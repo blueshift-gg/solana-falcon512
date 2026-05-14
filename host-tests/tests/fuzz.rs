@@ -44,14 +44,24 @@ fn sign(msg: &[u8]) -> ([u8; FALCON_512_PUBKEY_LEN], [u8; FALCON_512_SIGNATURE_L
 
 #[test]
 fn fuzz_random_inputs_no_panic() {
+    // Mix of random and header-valid inputs:
+    //   - random headers exercise the early-reject path,
+    //   - forced 0x09/0x39 headers drive past the header check into the
+    //     real verify pipeline (NTT decode, hash-to-point, norm).
+    // Without the forced-header iterations, ~99% of cases short-circuit
+    // at the header byte and the verify path is barely exercised.
     let mut rng = Rng::new(0xDEAD_BEEF_DEAD_BEEF);
-    for _ in 0..2000 {
+    for i in 0..2000 {
         let mut pk_bytes = [0u8; FALCON_512_PUBKEY_LEN];
         let mut sig_bytes = [0u8; FALCON_512_SIGNATURE_LEN];
         let mut msg = [0u8; 64];
         rng.fill(&mut pk_bytes);
         rng.fill(&mut sig_bytes);
         rng.fill(&mut msg);
+        if i & 1 == 0 {
+            pk_bytes[0] = 0x09;
+            sig_bytes[0] = 0x39;
+        }
         let pk = Falcon512Pubkey::from(pk_bytes);
         let sig = Falcon512Signature::from(sig_bytes);
         let _ = sig.verify(&msg, &pk);

@@ -38,6 +38,59 @@ pub fn decode_pubkey_u32(buf: &[u8], h: &mut [u32; N]) -> bool {
     true
 }
 
+/// Decode one Golomb-Rice-encoded `s2` coefficient from `buf`, advancing the
+/// shared bit-stream state (`acc`, `acc_len`, `idx_in`). Returns `None` on any
+/// rejection (buffer exhausted, magnitude ≥ 2048, or sign-with-zero
+/// malleability) and `Some(v)` with `-2047 ≤ v ≤ 2047` on success.
+///
+/// `#[inline(always)]` so the SBF codegen of the outer loop is unchanged from
+/// the pre-extraction version — the helper exists for Kani-targetable
+/// verification, not as a function-call boundary at runtime. Precondition:
+/// `*acc_len <= 7` (caller maintains this between calls).
+#[inline(always)]
+pub(crate) fn decompress_one_coeff(
+    buf: &[u8],
+    acc: &mut u64,
+    acc_len: &mut u64,
+    idx_in: &mut usize,
+) -> Option<i16> {
+    if *idx_in >= buf.len() {
+        return None;
+    }
+    *acc = (*acc << 8) | buf[*idx_in] as u64;
+    *idx_in += 1;
+    let b = *acc >> *acc_len;
+    let s = b & 128;
+    let mut m: u64 = b & 127;
+    loop {
+        if *acc_len == 0 {
+            if *idx_in >= buf.len() {
+                return None;
+            }
+            *acc = (*acc << 8) | buf[*idx_in] as u64;
+            *idx_in += 1;
+            *acc_len = 8;
+        }
+        *acc_len -= 1;
+        if ((*acc >> *acc_len) & 1) != 0 {
+            break;
+        }
+        m += 128;
+        if m >= 2048 {
+            return None;
+        }
+    }
+    if s != 0 && m == 0 {
+        return None;
+    }
+    // m ∈ [0, 2047], fits in i16 unsigned-positive — the i16 negation
+    // path is safe (no overflow at i16::MIN). Avoiding the i32 detour
+    // keeps the SBF compiler from emitting `lsh 0x20 ; rsh 0x20` u32
+    // truncation pairs around the negate.
+    let m_i16 = m as i16;
+    Some(if s != 0 { -m_i16 } else { m_i16 })
+}
+
 #[inline(always)]
 pub fn decompress_signature(buf: &[u8], s2: &mut [i16; N]) -> bool {
     // Accumulator is u64 so the per-byte shift-in (`acc << 8 | byte`) and the
@@ -54,41 +107,10 @@ pub fn decompress_signature(buf: &[u8], s2: &mut [i16; N]) -> bool {
     let mut acc_len: u64 = 0;
     let mut idx_in = 0usize;
     for u in s2.iter_mut().take(N) {
-        if idx_in >= buf.len() {
-            return false;
+        match decompress_one_coeff(buf, &mut acc, &mut acc_len, &mut idx_in) {
+            Some(v) => *u = v,
+            None => return false,
         }
-        acc = (acc << 8) | buf[idx_in] as u64;
-        idx_in += 1;
-        let b = acc >> acc_len;
-        let s = b & 128;
-        let mut m: u64 = b & 127;
-        loop {
-            if acc_len == 0 {
-                if idx_in >= buf.len() {
-                    return false;
-                }
-                acc = (acc << 8) | buf[idx_in] as u64;
-                idx_in += 1;
-                acc_len = 8;
-            }
-            acc_len -= 1;
-            if ((acc >> acc_len) & 1) != 0 {
-                break;
-            }
-            m += 128;
-            if m >= 2048 {
-                return false;
-            }
-        }
-        if s != 0 && m == 0 {
-            return false;
-        }
-        // m ∈ [0, 2047], fits in i16 unsigned-positive — the i16 negation
-        // path is safe (no overflow at i16::MIN). Avoiding the i32 detour
-        // keeps the SBF compiler from emitting `lsh 0x20 ; rsh 0x20` u32
-        // truncation pairs around the negate.
-        let m_i16 = m as i16;
-        *u = if s != 0 { -m_i16 } else { m_i16 };
     }
     if (acc & ((1u64 << acc_len) - 1)) != 0 {
         return false;
@@ -199,33 +221,5 @@ pub fn hash_to_point(nonce: &[u8], message: &[u8], c: &mut [u16; N]) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pubkey_decode_round_trip() {
-        // Pack 512 known coefficients (0,1,2,...,511 mod q) and decode.
-        let mut packed = [0u8; (N * 14) / 8];
-        let mut acc: u32 = 0;
-        let mut acc_len: u32 = 0;
-        let mut idx = 0;
-        for i in 0..N {
-            let w = (i as u32) % Q;
-            acc = (acc << 14) | w;
-            acc_len += 14;
-            while acc_len >= 8 {
-                acc_len -= 8;
-                packed[idx] = (acc >> acc_len) as u8;
-                idx += 1;
-            }
-        }
-        if acc_len > 0 {
-            packed[idx] = (acc << (8 - acc_len)) as u8;
-        }
-        let mut h = [0u32; N];
-        assert!(decode_pubkey_u32(&packed, &mut h));
-        for (i, &coeff) in h.iter().enumerate() {
-            assert_eq!(coeff, (i as u32) % Q);
-        }
-    }
-}
+#[path = "../internal-tests/codec.rs"]
+mod tests;

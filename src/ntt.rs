@@ -44,6 +44,9 @@ const PSI: u32 = find_psi();
 const PSI_INV: u32 = pow_mod(PSI, Q - 2, Q);
 pub(crate) const N_INV: u32 = pow_mod(N as u32, Q - 2, Q);
 
+// Compile-time check that the inverse is correct: N_INV · N ≡ 1 (mod Q).
+const _: () = assert!((N_INV as u64 * N as u64) % Q as u64 == 1);
+
 const ZETAS: [u32; N] = {
     let mut z = [0u32; N];
     let mut k = 0;
@@ -63,6 +66,143 @@ const INV_ZETAS: [u32; N] = {
     }
     z
 };
+
+// ============================================================================
+// Lazy-reduction offset constants (multiples of Q so `% Q` is unchanged).
+// Module-scope so harnesses in `crate::kani_proofs` reference the same
+// values production code uses, instead of redefining them.
+// ============================================================================
+
+/// Offset for the lazy-`t` CT butterfly. After 7 lazy fwd levels inputs are
+/// bounded by 8·Q, so `t = b·zeta < 8·Q²`.
+pub(crate) const T_OFFSET_LAZY_T: u64 = 8 * (Q as u64) * (Q as u64);
+const _: () = assert!(T_OFFSET_LAZY_T.is_multiple_of(Q as u64)); // spec-preserving
+const _: () = assert!(T_OFFSET_LAZY_T >= 8 * (Q as u64) * (Q as u64 - 1)); // ≥ max t
+
+/// Offset inside the lazy GS butterfly. Worst-case `v` after 7 inv-NTT lazy
+/// levels is ~256·Q.
+pub(crate) const LAZY_OFFSET_GS: u64 = (Q as u64) * 256;
+const _: () = assert!(LAZY_OFFSET_GS.is_multiple_of(Q as u64)); // spec-preserving
+const _: () = assert!(LAZY_OFFSET_GS >= 256 * (Q as u64)); // ≥ max v
+
+/// Offset for the fused last-fwd / pointwise / first-inv step. Worst-case
+/// `t = prev_high · z ≤ 8·Q³` (preceding fwd last main level is `ct_butterfly_lazy_t`).
+pub(crate) const T_OFFSET_FUSED: u64 = (Q as u64) * (1u64 << 31);
+const _: () = assert!(T_OFFSET_FUSED.is_multiple_of(Q as u64)); // spec-preserving
+// ≥ worst-case t = (8·Q + T_OFFSET_LAZY_T) · (Q − 1).
+const _: () = assert!(T_OFFSET_FUSED >= (8 * (Q as u64) + T_OFFSET_LAZY_T) * (Q as u64 - 1));
+
+/// Offset for `last_level_fused_norm` — large enough to absorb unreduced
+/// `new_hi ≤ 512·Q²`, and big enough that LLVM-SBF can't infer the subtract
+/// fits u32 (avoids zero-extension pairs around it).
+pub(crate) const BIG_Q_FUSED_NORM: u64 = (Q as u64) << 23;
+const _: () = assert!(BIG_Q_FUSED_NORM.is_multiple_of(Q as u64)); // spec-preserving
+// ≥ worst-case new_lo = 2 · 256·Q.
+const _: () = assert!(BIG_Q_FUSED_NORM >= 512 * (Q as u64));
+// ≥ worst-case new_hi = (256·Q + LAZY_OFFSET_GS) · (Q − 1) = 512·Q · (Q − 1).
+const _: () = assert!(BIG_Q_FUSED_NORM >= (256 * (Q as u64) + LAZY_OFFSET_GS) * (Q as u64 - 1));
+// Adding c (< Q) to BIG_Q can't overflow u64.
+const _: () = assert!(BIG_Q_FUSED_NORM <= u64::MAX - (Q as u64));
+// Exceeds u32::MAX so LLVM-SBF can't fold the subtract into u32 arithmetic.
+const _: () = assert!(BIG_Q_FUSED_NORM > u32::MAX as u64);
+
+// Lazy-NTT level bound: after K lazy fwd levels, values are bounded by (K+1)·Q.
+// For K ≤ 9 (production depth) this fits u32 — precondition fed into the
+// `ct_butterfly_no_overflow` Kani harness.
+const _: () = assert!(10 * (Q as u64) <= u32::MAX as u64);
+
+// ============================================================================
+// Butterfly / fused-step kernels.
+// `#[inline(always)]` so codegen matches the prior in-macro expansion.
+// Production macros and Kani harnesses both call these — single source of
+// truth for the arithmetic.
+// ============================================================================
+
+/// Strict CT butterfly: high-half `t` reduced mod Q. Lazy invariant
+/// `a, b ≤ 10·Q` ∧ `zeta < Q` ⇒ both outputs fit u32.
+#[inline(always)]
+pub(crate) const fn ct_butterfly_step(a: u64, b: u64, zeta: u64) -> (u64, u64) {
+    let q = Q as u64;
+    let t = b * zeta % q;
+    (a + t, a + q - t)
+}
+
+/// Lazy-`t` CT butterfly (skips `t % q`). Only safe at the last fwd main
+/// level — downstream `· zeta % q` absorbs un-reduction.
+#[inline(always)]
+pub(crate) const fn ct_butterfly_lazy_t_step(a: u64, b: u64, zeta: u64) -> (u64, u64) {
+    let t = b * zeta;
+    (a + t, a + T_OFFSET_LAZY_T - t)
+}
+
+/// Lazy GS butterfly (skips low-half `% q`). Next level's `· zeta % q`
+/// absorbs un-reduction.
+#[inline(always)]
+pub(crate) const fn gs_butterfly_lazy_step(u: u64, v: u64, zeta: u64) -> (u64, u64) {
+    let q = Q as u64;
+    let lo = u + v;
+    let hi = (u + LAZY_OFFSET_GS - v) * zeta % q;
+    (lo, hi)
+}
+
+/// Per-pair body of `fused_last_fwd_mul_first_inv`: fwd-CT-lazy step,
+/// pointwise mul, inv-GS step, all in registers. Returns u64 so callers can
+/// verify the cast back to u32 is safe.
+#[inline(always)]
+pub(crate) const fn fused_step_kernel(
+    prev_low: u32,
+    prev_high: u32,
+    h_lo: u16,
+    h_hi: u16,
+    z: u64,
+    z_inv: u64,
+) -> (u64, u64) {
+    let q = Q as u64;
+    let prev_low = prev_low as u64;
+    let prev_high = prev_high as u64;
+    let t = prev_high * z;
+    let s_low = prev_low + t;
+    let s_high = prev_low + T_OFFSET_FUSED - t;
+    let p_low = h_lo as u64 * s_low % q;
+    let p_high = h_hi as u64 * s_high % q;
+    let new_low = p_low + p_high;
+    let new_high = (p_low + q - p_high) * z_inv % q;
+    (new_low, new_high)
+}
+
+/// Per-pair body of `last_level_fused_norm`: inv-GS step + L2 contribution
+/// from positions `j` and `j + N/2`. Returns `|s1c_lo|² + |s1c_hi|² +
+/// s2_lo² + s2_hi²`.
+#[inline(always)]
+pub(crate) const fn fused_norm_step(
+    buf_lo: u32,
+    buf_hi: u32,
+    c_lo: u16,
+    c_hi: u16,
+    s2_lo: i16,
+    s2_hi: i16,
+    zeta: u64,
+) -> u64 {
+    let q = Q as u64;
+    let half_q = q / 2;
+    let u = buf_lo as u64;
+    let v = buf_hi as u64;
+    let new_lo = u + v;
+    let new_hi = (u + LAZY_OFFSET_GS - v) * zeta;
+    let raw_lo = ((c_lo as u64)
+        .wrapping_add(BIG_Q_FUSED_NORM)
+        .wrapping_sub(new_lo))
+        % q;
+    let raw_hi = ((c_hi as u64)
+        .wrapping_add(BIG_Q_FUSED_NORM)
+        .wrapping_sub(new_hi))
+        % q;
+    let s1c_lo = if raw_lo > half_q { q - raw_lo } else { raw_lo };
+    let s1c_hi = if raw_hi > half_q { q - raw_hi } else { raw_hi };
+    let s2_lo = s2_lo as i64;
+    let s2_hi = s2_hi as i64;
+    s1c_lo * s1c_lo + s1c_hi * s1c_hi + (s2_lo * s2_lo + s2_hi * s2_hi) as u64
+}
 
 // CT (Cooley–Tukey) butterfly used by the forward NTT. Reads `r[j]` and
 // `r[j+len]`, multiplies the upper half by `zeta`, and writes the (a+b, a-b)
@@ -85,11 +225,9 @@ const INV_ZETAS: [u32; N] = {
 // butterfly across hundreds of butterflies.
 macro_rules! ct_butterfly {
     ($r:ident, $j:expr, $len:expr, $zeta:expr) => {{
-        let q = Q as u64;
-        let t = ($r[$j + $len] as u64) * $zeta % q;
-        let u = $r[$j] as u64;
-        $r[$j] = (u + t) as u32;
-        $r[$j + $len] = (u + q - t) as u32;
+        let (lo, hi) = ct_butterfly_step($r[$j] as u64, $r[$j + $len] as u64, $zeta);
+        $r[$j] = lo as u32;
+        $r[$j + $len] = hi as u32;
     }};
 }
 
@@ -102,12 +240,9 @@ macro_rules! ct_butterfly {
 // `% Q` is unchanged) to keep `u + offset - t` non-negative.
 macro_rules! ct_butterfly_lazy_t {
     ($r:ident, $j:expr, $len:expr, $zeta:expr) => {{
-        // 8 · Q · Q = 8 · 12289² = 1,208,605,448 — multiple of Q, fits 32-bit imm.
-        const T_OFFSET: u64 = 8 * (Q as u64) * (Q as u64);
-        let t = ($r[$j + $len] as u64) * $zeta;
-        let u = $r[$j] as u64;
-        $r[$j] = (u + t) as u32;
-        $r[$j + $len] = (u + T_OFFSET - t) as u32;
+        let (lo, hi) = ct_butterfly_lazy_t_step($r[$j] as u64, $r[$j + $len] as u64, $zeta);
+        $r[$j] = lo as u32;
+        $r[$j + $len] = hi as u32;
     }};
 }
 
@@ -147,12 +282,9 @@ macro_rules! gs_butterfly {
 // variant — ~1.8k CU across 7 levels × 256 butterflies on the inverse path.
 macro_rules! gs_butterfly_lazy {
     ($r:ident, $j:expr, $len:expr, $zeta:expr) => {{
-        let q = Q as u64;
-        let lazy_offset = q * 256;
-        let u = $r[$j] as u64;
-        let v = $r[$j + $len] as u64;
-        $r[$j] = (u + v) as u32;
-        $r[$j + $len] = ((u + lazy_offset - v) * $zeta % q) as u32;
+        let (lo, hi) = gs_butterfly_lazy_step($r[$j] as u64, $r[$j + $len] as u64, $zeta);
+        $r[$j] = lo as u32;
+        $r[$j + $len] = hi as u32;
     }};
 }
 
@@ -530,61 +662,27 @@ pub const fn inv_ntt_last_level(r: &mut [u32; N]) {
 ///   |s1c| = min(raw, Q − raw)
 ///   norm += |s1c|² + s2[i]²
 pub fn last_level_fused_norm(buf: &[u32; N], c: &[u16; N], s2: &[i16; N], bound: u64) -> bool {
-    let q = Q as u64;
-    let half_q = q / 2;
     let zeta = INV_ZETAS[1] as u64;
-    // `big_q = q << 23` ≈ 1.03·10¹¹ — large enough to absorb unreduced
-    // `new_lo` (≤ 512·Q ≈ 6.3·10⁶) and unreduced `new_hi` (≤ 512·Q² ≈
-    // 7.7·10¹⁰) in `(c + big_q - new_*) % q`. Both `new_*` values are
-    // computed without `% q` (saves 2 mods per iter × 256 iters); the
-    // outer `% q` on raw_* absorbs the un-reduction.
-    let big_q = q << 23;
-    // Same `256·Q` offset as `gs_butterfly_lazy`: the previous (level 7)
-    // output may be unreduced up to ~256·Q (fused step now leaves its low
-    // halves at up to 2·Q, doubling every level), so a plain `u + q - v`
-    // would underflow.
-    let lazy_offset = q * 256;
     let mut norm: u64 = 0;
     let mut j = 0;
     while j < N / 2 {
-        // Last GS butterfly in registers — outputs are *not* written back
-        // to `buf`. Both halves (`new_lo` for index `j`, `new_hi` for index
-        // `j + N/2`) feed straight into the norm contribution below.
         unsafe { core::hint::assert_unchecked(j + N / 2 < N) };
-        let u = buf[j] as u64;
-        let v = buf[j + N / 2] as u64;
-        // Unreduced — `% q` happens via the `raw_*` computations below.
-        let new_lo = u + v;
-        let new_hi = (u + lazy_offset - v) * zeta;
-
-        // |s1c|² for both positions. The intermediate uses a large multiple
-        // of q (`big_q = q << 23`) so the value comfortably exceeds the
-        // un-reduced `new_*` ranges, AND exceeds u32::MAX so LLVM-SBF can't
-        // infer the computation fits u32 and emit `lsh 0x20 ; rsh 0x20`
-        // zero-extension pairs around the subtract.
-        let raw_lo = ((c[j] as u64).wrapping_add(big_q).wrapping_sub(new_lo)) % q;
-        let raw_hi = ((c[j + N / 2] as u64)
-            .wrapping_add(big_q)
-            .wrapping_sub(new_hi))
-            % q;
-        let s1c_lo = if raw_lo > half_q { q - raw_lo } else { raw_lo };
-        let s1c_hi = if raw_hi > half_q { q - raw_hi } else { raw_hi };
-
-        // s2[i]² as signed mul (i16 → i64 sign-extend → square gives the
-        // unsigned magnitude squared).
-        let s2_lo = s2[j] as i64;
-        let s2_hi = s2[j + N / 2] as i64;
-
-        norm += s1c_lo * s1c_lo + s1c_hi * s1c_hi;
-        norm += (s2_lo * s2_lo + s2_hi * s2_hi) as u64;
-
+        norm += fused_norm_step(
+            buf[j],
+            buf[j + N / 2],
+            c[j],
+            c[j + N / 2],
+            s2[j],
+            s2[j + N / 2],
+            zeta,
+        );
         j += 1;
     }
     norm <= bound
 }
 
-// Standalone full inverse NTT, only used by unit tests (round-trip and
-// schoolbook-multiplication checks). Production calls
+// Standalone full inverse NTT, only used by unit tests (the scalar-reference
+// differential and the schoolbook-multiplication proptest). Production calls
 // `fused_last_fwd_mul_first_inv` followed by `inv_ntt_main_levels`.
 //
 // Production's `inv_ntt_main_levels` is intentionally unscaled — the `1/N`
@@ -630,44 +728,19 @@ pub const fn inv_ntt(r: &mut [u32; N]) {
 /// iteration touches them. So reading and writing through one buffer is
 /// equivalent to a separate-input/output formulation.
 pub fn fused_last_fwd_mul_first_inv(buf: &mut [u32; N], h_pk_ntt: &[u16; N]) {
-    // `T_OFFSET = 2³¹·Q ≈ 2.64·10¹³` — a multiple of Q (so `% Q` is
-    // unchanged) and ≥ the worst-case `t = prev_high · z ≤ 8·Q³ ≈ 1.49·10¹³`
-    // (since the forward NTT's last main level uses `ct_butterfly_lazy_t`,
-    // capping prev_* at 8·Q²). Lifted to the function level so LLVM-SBF
-    // emits the `lddw` once and reuses the register across all 256 inner
-    // iterations rather than reloading per unrolled body.
-    let t_offset: u64 = (Q as u64) * (1u64 << 31);
     macro_rules! step {
         ($i:expr) => {{
             let pair = 2 * $i;
             let z = ZETAS[N / 2 + $i] as u64;
             let z_inv = INV_ZETAS[N / 2 + $i] as u64;
-            let q = Q as u64;
-
-            // Snapshot s2_ntt's values at this pair *before* any write, so
-            // the buffer can safely back both the input (s2) and output
-            // (prod) roles.
-            let prev_low = buf[pair] as u64;
-            let prev_high = buf[pair + 1] as u64;
-
-            // Forward last level CT butterfly (in registers, u64 throughout).
-            // We deliberately *don't* reduce `t`, `s_low`, or `s_high` mod q
-            // — they all flow into the next mul+mod which absorbs un-reduced
-            // state.
-            let t = prev_high * z;
-            let s_low = prev_low + t;
-            let s_high = prev_low + t_offset - t;
-
-            // Pointwise multiplication with prepared pubkey.
-            let p_low = h_pk_ntt[pair] as u64 * s_low % q;
-            let p_high = h_pk_ntt[pair + 1] as u64 * s_high % q;
-
-            // Inverse first level GS butterfly back into the same pair.
-            // Low half stored unreduced (up to 2·Q): the next inv-NTT level
-            // uses `gs_butterfly_lazy` whose `* zeta % q` absorbs it.
-            let new_low = p_low + p_high;
-            let new_high = (p_low + q - p_high) * z_inv % q;
-
+            let (new_low, new_high) = fused_step_kernel(
+                buf[pair],
+                buf[pair + 1],
+                h_pk_ntt[pair],
+                h_pk_ntt[pair + 1],
+                z,
+                z_inv,
+            );
             buf[pair] = new_low as u32;
             buf[pair + 1] = new_high as u32;
         }};
@@ -685,62 +758,5 @@ pub fn fused_last_fwd_mul_first_inv(buf: &mut [u32; N], h_pk_ntt: &[u16; N]) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ntt_round_trip() {
-        let mut a = [0u32; N];
-        for (i, slot) in a.iter_mut().enumerate() {
-            *slot = ((i * 17 + 3) as u32) % Q;
-        }
-        let original = a;
-        ntt(&mut a);
-        inv_ntt(&mut a);
-        assert_eq!(a, original);
-    }
-
-    #[test]
-    fn ntt_multiplication_matches_schoolbook() {
-        // Random-ish polynomials a, b in Z_q. Compute a*b via NTT and via schoolbook
-        // negacyclic mul; results must match.
-        let mut a = [0u32; N];
-        let mut b = [0u32; N];
-        for i in 0..N {
-            a[i] = ((i * 31 + 7) as u32) % Q;
-            b[i] = ((i * 19 + 11) as u32) % Q;
-        }
-
-        // Schoolbook negacyclic
-        let mut c_school = [0i64; N];
-        #[allow(clippy::needless_range_loop)] // index used into both `a` and `b` simultaneously
-        for i in 0..N {
-            for j in 0..N {
-                let prod = (a[i] as i64) * (b[j] as i64);
-                let k = i + j;
-                if k < N {
-                    c_school[k] += prod;
-                } else {
-                    c_school[k - N] -= prod;
-                }
-            }
-        }
-        let mut c_school_q = [0u32; N];
-        for i in 0..N {
-            let v = c_school[i].rem_euclid(Q as i64) as u32;
-            c_school_q[i] = v;
-        }
-
-        let mut a_ntt = a;
-        let mut b_ntt = b;
-        ntt(&mut a_ntt);
-        ntt(&mut b_ntt);
-        let mut prod = [0u32; N];
-        for i in 0..N {
-            prod[i] = (a_ntt[i] as u64 * b_ntt[i] as u64 % Q as u64) as u32;
-        }
-        inv_ntt(&mut prod);
-
-        assert_eq!(prod, c_school_q);
-    }
-}
+#[path = "../internal-tests/ntt.rs"]
+mod tests;

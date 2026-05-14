@@ -177,6 +177,12 @@ fn soak_differential_vs_pqclean() {
     // reject a malformed buffer before any cryptographic check; we treat that
     // as "PQClean rejects" since the question we're asking is the same on
     // both sides — does this byte sequence verify against this msg/pk.
+    //
+    // The `verify_with_prepared` arm uses `try_prepare_pubkey` (the fallible
+    // sibling of `prepare_pubkey`) so a malformed pubkey returns `Err` rather
+    // than panicking under the parallel iterator; an `Err` is treated as
+    // reject. This closes the loop: if `ours == theirs` and `ours_prepared
+    // == ours`, then `verify_with_prepared` is also equivalent to PQClean.
     let n = iters("SOAK_DIFFERENTIAL", 100_000_000);
     println!("soak_differential_vs_pqclean: {n} iterations");
     let start = Instant::now();
@@ -192,8 +198,15 @@ fn soak_differential_vs_pqclean() {
             rng.fill(&mut sig_bytes);
             rng.fill(&mut msg);
 
-            let ours =
-                Falcon512Signature::from(sig_bytes).verify(&msg, &Falcon512Pubkey::from(pk_bytes));
+            let pk_obj = Falcon512Pubkey::from(pk_bytes);
+            let sig_obj = Falcon512Signature::from(sig_bytes);
+
+            let ours = sig_obj.verify(&msg, &pk_obj);
+
+            let ours_prepared = match pk_obj.try_prepare_pubkey() {
+                Ok(prepared) => sig_obj.verify_with_prepared(&msg, &prepared),
+                Err(_) => false,
+            };
 
             let theirs = match (
                 falcon512::PublicKey::from_bytes(&pk_bytes),
@@ -203,7 +216,11 @@ fn soak_differential_vs_pqclean() {
                 _ => false,
             };
 
-            if ours != theirs { 1 } else { 0 }
+            if ours == theirs && ours == ours_prepared {
+                0
+            } else {
+                1
+            }
         })
         .sum();
     let elapsed = start.elapsed();

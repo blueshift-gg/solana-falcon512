@@ -66,6 +66,18 @@ mod codec;
 mod keccak;
 mod ntt;
 
+#[cfg(kani)]
+#[path = "../internal-tests/kani_proofs.rs"]
+mod kani_proofs;
+
+#[cfg(test)]
+#[path = "../internal-tests/adversarial_proptests.rs"]
+mod adversarial_proptests;
+
+#[cfg(test)]
+#[path = "../internal-tests/spec_pins.rs"]
+mod spec_pins;
+
 /// Wire-encoded Falcon-512 pubkey length, including the 1-byte header.
 pub const FALCON_512_PUBKEY_LEN: usize = 897;
 
@@ -88,6 +100,20 @@ const NONCE_LEN: usize = 40;
 const L2_BOUND: u64 = 34_034_726;
 const PUBKEY_HEADER: u8 = 0x09;
 const SIG_HEADER: u8 = 0x39;
+
+// Compile-time guards on the wire-encoding length constants:
+// - Sig: 1 header + 40 nonce + 625 Golomb-Rice = 666 bytes.
+// - Pubkey: 1 header + ceil(N * 14 / 8) = 1 + 896 = 897 bytes.
+const _: () = assert!(FALCON_512_SIGNATURE_LEN == 1 + NONCE_LEN + 625);
+const _: () = assert!(FALCON_512_PUBKEY_LEN == 1 + (N * 14) / 8);
+
+// Norm-accumulation overflow safety + meaningfulness:
+// - Worst-case `‖s1‖² + ‖s2‖²` per coefficient is `(Q/2)² + 2047²`; over N
+//   slots the total fits u64.
+// - L2_BOUND must be reachable (i.e., < the worst-case total) so the
+//   verifier's `<= L2_BOUND` test isn't trivially true.
+const _: () = assert!(((Q as u64 / 2) * (Q as u64 / 2) + 2047u64 * 2047) * (N as u64) < u64::MAX);
+const _: () = assert!(L2_BOUND < ((Q as u64 / 2) * (Q as u64 / 2) + 2047u64 * 2047) * (N as u64));
 
 /// Wire-encoded Falcon-512 public key (header byte `0x09` + 14-bit-packed
 /// polynomial `h ∈ Z_q[x] / (x^512 + 1)`).
@@ -307,10 +333,13 @@ impl Falcon512PreparedPubkey {
     }
 
     /// Borrow an arbitrary-length `&[u8]` as a `&Falcon512PreparedPubkey`,
-    /// checking both the length and the 2-byte alignment requirement. Safe
-    /// API around [`from_ref`](Self::from_ref) — returns
-    /// `Err(InvalidArgument)` if the slice isn't 1024 bytes or isn't aligned
-    /// to a `u16` boundary.
+    /// checking length, 2-byte alignment, and coefficient range (`< Q`).
+    /// Returns `Err(InvalidArgument)` if any check fails.
+    ///
+    /// This is the recommended entry point for loading a prepared pubkey
+    /// from untrusted account data — it validates that every NTT
+    /// coefficient is in `[0, Q)`, preventing wrong verification results
+    /// from corrupted or attacker-controlled account bytes.
     ///
     /// Solana account data is 8-byte aligned per the program ABI, so reading
     /// from `&account.data[..1024]` always passes the alignment check (and
@@ -328,13 +357,25 @@ impl Falcon512PreparedPubkey {
         }
         // SAFETY: length matches (`try_into` succeeded) and alignment
         // verified above.
-        Ok(unsafe { Self::from_ref(array) })
+        let pk = unsafe { Self::from_ref(array) };
+        // Coefficient range check — every NTT coefficient must be < Q.
+        // Without this, an attacker who controls the account data could
+        // write out-of-range coefficients that cause verify_with_prepared
+        // to produce wrong results.
+        if !pk.validate() {
+            return Err(ProgramError::InvalidArgument);
+        }
+        Ok(pk)
     }
 
     /// Reconstruct from a 1024-byte buffer produced by [`as_bytes`](Self::as_bytes).
     /// Coefficients are read as little-endian `u16`s. No validation is
     /// performed — the bytes are assumed to come from a trusted source
     /// (typically a Solana account previously written by your own program).
+    ///
+    /// If the source is untrusted (e.g. account data that another program
+    /// or user could have written), call [`validate`](Self::validate)
+    /// after construction to verify all coefficients are in range.
     pub const fn from_bytes(bytes: [u8; FALCON_512_PREPARED_PUBKEY_LEN]) -> Self {
         let mut h = [0u16; N];
         let mut i = 0;
@@ -343,6 +384,27 @@ impl Falcon512PreparedPubkey {
             i += 1;
         }
         Self(h)
+    }
+
+    /// Check that every NTT coefficient is `< Q`. Returns `true` if all
+    /// coefficients are in range, `false` if any coefficient is `>= Q`.
+    ///
+    /// A prepared pubkey produced by [`Falcon512Pubkey::prepare_pubkey`] is
+    /// always valid. This method is needed only when loading a prepared
+    /// pubkey from an untrusted source (e.g. a Solana account that another
+    /// program or user could have written). Using an invalid prepared
+    /// pubkey with [`Falcon512Signature::verify_with_prepared`] is not
+    /// memory-unsafe, but can produce wrong verification results —
+    /// accepting invalid signatures or rejecting valid ones.
+    pub const fn validate(&self) -> bool {
+        let mut i = 0;
+        while i < N {
+            if self.0[i] as u32 >= Q {
+                return false;
+            }
+            i += 1;
+        }
+        true
     }
 
     /// Borrow the underlying `[u16; N]` storage as a `&[u8; LEN]` byte view
@@ -566,3 +628,7 @@ fn norm_check_with_prepared(h_pk_ntt: &[u16; N], s2: &[i16; N], c: &[u16; N]) ->
     ntt::inv_ntt_main_levels(buf);
     ntt::last_level_fused_norm(buf, c, s2, L2_BOUND)
 }
+
+#[cfg(test)]
+#[path = "../internal-tests/miri_unsafe_paths.rs"]
+mod miri_unsafe_paths;

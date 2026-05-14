@@ -1,3 +1,4 @@
+// Keccak-f[1600] round constants from NIST FIPS 202, §3.2.5.
 const RC: [u64; 24] = [
     0x0000000000000001,
     0x0000000000008082,
@@ -24,6 +25,12 @@ const RC: [u64; 24] = [
     0x0000000080000001,
     0x8000000080008008,
 ];
+
+// NIST FIPS 202, §6.2 defines SHAKE with suffix `1111`; after the first
+// `pad10*1` bit is included in the byte stream, the little-endian byte suffix
+// is `0001_1111` = 0x1f. The final `pad10*1` bit is set in the last rate byte.
+const SHAKE256_DOMAIN_SUFFIX: u64 = 0x1f;
+const SHAKE256_FINAL_RATE_BIT: u64 = 0x80;
 
 fn keccak_f1600(s: &mut [u64; 25]) {
     // **Bertoni lane-complementing + chi-row** layout.
@@ -191,6 +198,8 @@ fn keccak_f1600(s: &mut [u64; 25]) {
     s[20] = !s[20];
 }
 
+// NIST FIPS 202, §6.2: SHAKE256 uses capacity 512 bits, so its rate is
+// 1600 - 512 = 1088 bits = 136 bytes.
 const RATE: usize = 136;
 
 pub struct Shake256 {
@@ -263,9 +272,9 @@ impl Shake256 {
     pub fn finalize(&mut self) {
         let lane = self.pos / 8;
         let shift = 8 * (self.pos % 8);
-        self.state[lane] ^= 0x1Fu64 << shift;
+        self.state[lane] ^= SHAKE256_DOMAIN_SUFFIX << shift;
         let last = RATE - 1;
-        self.state[last / 8] ^= 0x80u64 << (8 * (last % 8));
+        self.state[last / 8] ^= SHAKE256_FINAL_RATE_BIT << (8 * (last % 8));
         keccak_f1600(&mut self.state);
         self.pos = 0;
     }
@@ -303,56 +312,5 @@ impl Shake256 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shake256_empty() {
-        // NIST KAT: SHAKE256("") first 32 bytes
-        let expected: [u8; 32] = [
-            0x46, 0xb9, 0xdd, 0x2b, 0x0b, 0xa8, 0x8d, 0x13, 0x23, 0x3b, 0x3f, 0xeb, 0x74, 0x3e,
-            0xeb, 0x24, 0x3f, 0xcd, 0x52, 0xea, 0x62, 0xb8, 0x1b, 0x82, 0xb5, 0x0c, 0x27, 0x64,
-            0x6e, 0xd5, 0x76, 0x2f,
-        ];
-        let mut s = Shake256::new();
-        s.finalize();
-        let mut out = [0u8; 32];
-        s.squeeze(&mut out);
-        assert_eq!(out, expected);
-    }
-
-    #[test]
-    fn shake256_abc() {
-        // SHAKE256("abc") first 32 bytes
-        let expected: [u8; 32] = [
-            0x48, 0x33, 0x66, 0x60, 0x13, 0x60, 0xa8, 0x77, 0x1c, 0x68, 0x63, 0x08, 0x0c, 0xc4,
-            0x11, 0x4d, 0x8d, 0xb4, 0x45, 0x30, 0xf8, 0xf1, 0xe1, 0xee, 0x4f, 0x94, 0xea, 0x37,
-            0xe7, 0x8b, 0x57, 0x39,
-        ];
-        let mut s = Shake256::new();
-        s.absorb(b"abc");
-        s.finalize();
-        let mut out = [0u8; 32];
-        s.squeeze(&mut out);
-        assert_eq!(out, expected);
-    }
-
-    #[test]
-    fn shake256_long_squeeze() {
-        // Squeeze across multiple blocks (RATE=136 bytes per permutation).
-        let mut s = Shake256::new();
-        s.finalize();
-        let mut out = [0u8; 200];
-        s.squeeze(&mut out);
-        // Bytes 136..168 are the start of the second permutation block.
-        // Verify by squeezing two halves and comparing.
-        let mut s2 = Shake256::new();
-        s2.finalize();
-        let mut a = [0u8; 100];
-        let mut b = [0u8; 100];
-        s2.squeeze(&mut a);
-        s2.squeeze(&mut b);
-        assert_eq!(&out[..100], &a[..]);
-        assert_eq!(&out[100..], &b[..]);
-    }
-}
+#[path = "../internal-tests/keccak.rs"]
+mod tests;

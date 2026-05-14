@@ -38,3 +38,12 @@ jobs:
       - name: cargo +nightly clippy (program)
         working-directory: program
         run: cargo +nightly clippy --all-targets -- -D warnings
+
+  kani:
+    name: kani (formal verification)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: model-checking/kani-github-action@v1

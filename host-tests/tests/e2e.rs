@@ -48,16 +48,23 @@ fn rejects_modified_message() {
 #[test]
 fn rejects_modified_signature() {
     let msg = b"falcon-512 test message";
-    let (pk_bytes, mut sig_bytes) = sign_with_pqclean(msg);
-
-    // Flip a bit inside the compressed sig payload (past the 1-byte header and
-    // 40-byte nonce).
-    sig_bytes[100] ^= 0x01;
-
+    let (pk_bytes, sig_bytes) = sign_with_pqclean(msg);
     let pubkey = Falcon512Pubkey::from(pk_bytes);
-    let signature = Falcon512Signature::from(sig_bytes);
 
-    assert!(!signature.verify(msg, &pubkey));
+    // Each mutation should be rejected. Hits one byte in each of the three
+    // wire-format regions: the header (rejected at header check), the salt
+    // (rejected at hash-to-point divergence), the compressed s2 payload
+    // (rejected at norm or decompression). The deeper-fuzz battery in
+    // `fuzz.rs::fuzz_mutated_signature_rejects` exercises 500 random mutations.
+    for &mutation_byte in &[0usize, 20, 100] {
+        let mut tampered = sig_bytes;
+        tampered[mutation_byte] ^= 0x01;
+        let signature = Falcon512Signature::from(tampered);
+        assert!(
+            !signature.verify(msg, &pubkey),
+            "mutation at byte {mutation_byte} was not rejected"
+        );
+    }
 }
 
 #[test]
@@ -89,37 +96,52 @@ fn many_signatures_verify() {
 fn prepared_pubkey_roundtrip_matches_direct_verify() {
     // Models the on-chain "prepare once, store in PDA, verify later" flow:
     // call `prepare_pubkey()` at runtime, serialize to bytes, deserialize
-    // back, and confirm `verify_with_prepared` accepts the same signatures
-    // that direct `verify` accepts (and rejects the same forgeries).
+    // back, and confirm `verify_with_prepared` returns the same verdict as
+    // direct `verify`.
     for i in 0..8 {
         let msg = format!("prepared roundtrip msg #{i}");
         let (pk_bytes, sig_bytes) = sign_with_pqclean(msg.as_bytes());
         let pubkey = Falcon512Pubkey::from(pk_bytes);
-        let signature = Falcon512Signature::from(sig_bytes);
 
         let prepared = pubkey.prepare_pubkey();
         let serialized: [u8; FALCON_512_PREPARED_PUBKEY_LEN] = *prepared.as_bytes();
         let prepared_roundtripped = Falcon512PreparedPubkey::from_bytes(serialized);
 
-        assert!(
-            signature.verify(msg.as_bytes(), &pubkey),
-            "iter {i}: direct verify rejected a valid signature"
-        );
-        assert!(
-            signature.verify_with_prepared(msg.as_bytes(), &prepared),
-            "iter {i}: prepared verify rejected a valid signature"
-        );
-        assert!(
-            signature.verify_with_prepared(msg.as_bytes(), &prepared_roundtripped),
-            "iter {i}: roundtripped prepared verify rejected a valid signature"
-        );
+        let mut cases = Vec::new();
+        cases.push((sig_bytes, msg.into_bytes(), true, "valid"));
 
-        // And the negative direction — tampered message must fail on the
-        // prepared path too.
-        let tampered = format!("tampered msg #{i}");
-        assert!(
-            !signature.verify_with_prepared(tampered.as_bytes(), &prepared_roundtripped),
-            "iter {i}: prepared verify accepted a tampered message"
-        );
+        let mut wrong_msg = cases[0].1.clone();
+        wrong_msg.push(b'!');
+        cases.push((sig_bytes, wrong_msg, false, "wrong message"));
+
+        let mut tampered_sig = sig_bytes;
+        tampered_sig[100] ^= 0x01;
+        cases.push((
+            tampered_sig,
+            cases[0].1.clone(),
+            false,
+            "tampered signature",
+        ));
+
+        for (sig_case, msg_case, expected, label) in cases {
+            let signature = Falcon512Signature::from(sig_case);
+            let direct = signature.verify(&msg_case, &pubkey);
+            let prepared_verdict = signature.verify_with_prepared(&msg_case, &prepared);
+            let roundtripped_verdict =
+                signature.verify_with_prepared(&msg_case, &prepared_roundtripped);
+
+            assert_eq!(
+                direct, expected,
+                "iter {i} ({label}): direct verify returned the wrong verdict"
+            );
+            assert_eq!(
+                prepared_verdict, direct,
+                "iter {i} ({label}): prepared verify diverged from direct verify"
+            );
+            assert_eq!(
+                roundtripped_verdict, direct,
+                "iter {i} ({label}): roundtripped prepared verify diverged from direct verify"
+            );
+        }
     }
 }

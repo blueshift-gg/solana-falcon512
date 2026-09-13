@@ -12,7 +12,8 @@ const SIG: [u8; SIG_LEN] = *include_bytes!("fixtures/sample_sig.bin");
 const MSG: &[u8] = b"deterministic falcon-512 verify benchmark";
 
 fn build_ix_data(sig: [u8; SIG_LEN], msg: &[u8]) -> Vec<u8> {
-    let mut data = Vec::with_capacity(SIG_LEN + msg.len());
+    let mut data = Vec::with_capacity(1 + SIG_LEN + msg.len());
+    data.push(0);
     data.extend_from_slice(&sig);
     data.extend_from_slice(msg);
     data
@@ -81,4 +82,27 @@ fn rejects_tampered_signature() {
         "expected failure on tampered sig, got: {:?}",
         result.program_result
     );
+}
+
+#[test]
+fn verify_turbo_and_reject_cross_mode() {
+    let (mollusk, program_id) = make_mollusk();
+    let turbo = *include_bytes!("fixtures/turbo_sig.bin");
+    for (mode, sig) in [(1, turbo), (0, turbo), (1, SIG)] {
+        let mut data = build_ix_data(sig, MSG);
+        data[0] = mode;
+        let ix = Instruction {
+            program_id,
+            accounts: vec![],
+            data,
+        };
+        let result = mollusk.process_instruction(&ix, &[]);
+        assert_eq!(result.program_result.is_err(), mode != 1 || sig != turbo);
+        if mode == 1 && sig == turbo {
+            println!(
+                "verify_turbo OK — compute units consumed: {}",
+                result.compute_units_consumed
+            );
+        }
+    }
 }

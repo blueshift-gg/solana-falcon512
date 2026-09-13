@@ -28,7 +28,7 @@ fn verify_pqclean_signature() {
     let msg = b"falcon-512 test message";
     let (pk_bytes, sig_bytes) = sign_with_pqclean(msg);
 
-    let pubkey = Falcon512Pubkey::from(pk_bytes);
+    let pubkey = Falcon512Pubkey::<false>::from(pk_bytes);
     let signature = Falcon512Signature::from(sig_bytes);
 
     assert!(signature.verify(msg, &pubkey));
@@ -39,7 +39,7 @@ fn rejects_modified_message() {
     let msg = b"original message";
     let (pk_bytes, sig_bytes) = sign_with_pqclean(msg);
 
-    let pubkey = Falcon512Pubkey::from(pk_bytes);
+    let pubkey = Falcon512Pubkey::<false>::from(pk_bytes);
     let signature = Falcon512Signature::from(sig_bytes);
 
     assert!(!signature.verify(b"tampered message", &pubkey));
@@ -49,7 +49,7 @@ fn rejects_modified_message() {
 fn rejects_modified_signature() {
     let msg = b"falcon-512 test message";
     let (pk_bytes, sig_bytes) = sign_with_pqclean(msg);
-    let pubkey = Falcon512Pubkey::from(pk_bytes);
+    let pubkey = Falcon512Pubkey::<false>::from(pk_bytes);
 
     // Each mutation should be rejected. Hits one byte in each of the three
     // wire-format regions: the header (rejected at header check), the salt
@@ -73,7 +73,7 @@ fn rejects_wrong_pubkey() {
     let (_pk_bytes, sig_bytes) = sign_with_pqclean(msg);
     let (other_pk_bytes, _) = sign_with_pqclean(b"unrelated");
 
-    let pubkey = Falcon512Pubkey::from(other_pk_bytes);
+    let pubkey = Falcon512Pubkey::<false>::from(other_pk_bytes);
     let signature = Falcon512Signature::from(sig_bytes);
 
     assert!(!signature.verify(msg, &pubkey));
@@ -86,7 +86,7 @@ fn many_signatures_verify() {
     for i in 0..8 {
         let msg = format!("message #{i}");
         let (pk_bytes, sig_bytes) = sign_with_pqclean(msg.as_bytes());
-        let pubkey = Falcon512Pubkey::from(pk_bytes);
+        let pubkey = Falcon512Pubkey::<false>::from(pk_bytes);
         let signature = Falcon512Signature::from(sig_bytes);
         assert!(signature.verify(msg.as_bytes(), &pubkey), "iter {i}");
     }
@@ -101,11 +101,11 @@ fn prepared_pubkey_roundtrip_matches_direct_verify() {
     for i in 0..8 {
         let msg = format!("prepared roundtrip msg #{i}");
         let (pk_bytes, sig_bytes) = sign_with_pqclean(msg.as_bytes());
-        let pubkey = Falcon512Pubkey::from(pk_bytes);
+        let pubkey = Falcon512Pubkey::<false>::from(pk_bytes);
 
         let prepared = pubkey.prepare_pubkey();
         let serialized: [u8; FALCON_512_PREPARED_PUBKEY_LEN] = *prepared.as_bytes();
-        let prepared_roundtripped = Falcon512PreparedPubkey::from_bytes(serialized);
+        let prepared_roundtripped = Falcon512PreparedPubkey::<false>::from_bytes(serialized);
 
         let mut cases = Vec::new();
         cases.push((sig_bytes, msg.into_bytes(), true, "valid"));

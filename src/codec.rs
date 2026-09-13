@@ -1,5 +1,5 @@
-use crate::keccak::Shake256;
 use crate::{N, Q};
+use solana_shake::Shake;
 
 pub fn decode_pubkey_u32(buf: &[u8], h: &mut [u32; N]) -> bool {
     if buf.len() < (N * 14) / 8 {
@@ -138,15 +138,15 @@ pub fn decompress_signature(buf: &[u8], s2: &mut [i16; N]) -> bool {
     true
 }
 
-pub fn hash_to_point(nonce: &[u8], message: &[u8], c: &mut [u16; N]) {
-    let mut s = Shake256::new();
+pub fn hash_to_point<const TURBO: bool>(nonce: &[u8], message: &[u8], c: &mut [u16; N]) {
+    let mut s = Shake::<256, TURBO>::new();
     s.absorb(nonce);
     s.absorb(message);
-    s.finalize();
+    let mut s = s.finalize_with_domain::<0x1f>();
 
     // SAFETY (cryptographic equivalence with the per-byte squeeze loop):
     //
-    // After `finalize`, `s.pos == 0` and a freshly-permuted rate (17 u64 lanes
+    // After finalization, a freshly-permuted rate (17 u64 lanes
     // = 136 bytes) is ready to be squeezed. Falcon's `hash_to_point` reads the
     // SHAKE256 output as a stream of bytes and pairs them up big-endian into
     // 16-bit candidates: `w = (byte[2k] << 8) | byte[2k+1]`. With FIPS-202's

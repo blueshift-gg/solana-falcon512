@@ -38,6 +38,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [dependencies]
 solana-program-error = "3.0.1"
+# SHAKE/TurboSHAKE API: https://github.com/blueshift-gg/solana-shake/pull/1
+solana-shake = { version = "0.1.0", git = "https://github.com/blueshift-gg/solana-shake", rev = "684f8152dd8b75c8793ba495511b9b938b1b5aeb" }
 
 [dev-dependencies]
 proptest = "1"

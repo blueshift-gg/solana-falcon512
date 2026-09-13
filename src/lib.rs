@@ -2,12 +2,10 @@
 //!
 //! Implements [FN-DSA / Falcon] signature verification (compressed-format
 //! signatures only, header byte `0x39`). The crate is `no_std`, allocation
-//! free, and all heavy work — pubkey decoding, NTT, SHAKE-256, signature
-//! decompression — is hand-written. On Solana SBF a single verify costs
-//! roughly **173k–183k compute units** with a prepared pubkey (the spread
-//! is per-signature variance in `hash_to_point`'s SHAKE-256 rejection
-//! sampling) or ~270k with a raw wire pubkey via
-//! [`Falcon512Pubkey::prepare_pubkey`] / [`Falcon512Pubkey::try_prepare_pubkey`].
+//! free, using [`solana_shake`] for SHAKE256 and optional TurboSHAKE256.
+//! With a prepared pubkey, the fixed SBF benchmark uses about 175k compute
+//! units with SHAKE256 or 133k with TurboSHAKE256. Cost varies with message
+//! length and rejection sampling.
 //!
 //! [FN-DSA / Falcon]: https://falcon-sign.info
 //!
@@ -16,14 +14,14 @@
 //! ```ignore
 //! use solana_falcon512::{Falcon512Pubkey, Falcon512Signature};
 //!
-//! let pubkey = Falcon512Pubkey::try_from(&pk_bytes[..])?;
+//! let pubkey = Falcon512Pubkey::<false>::try_from(&pk_bytes[..])?;
 //! let signature = Falcon512Signature::try_from(&sig_bytes[..])?;
 //! let ok = signature.verify(message, &pubkey);
 //! ```
 //!
 //! For Solana programs with a hard-coded pubkey, prefer the prepared-pubkey
 //! path — `prepare_pubkey()` is a `const fn`, so the NTT-form pubkey can be
-//! embedded as a `const` and the per-call work is reduced by ~99k CUs:
+//! embedded as a `const`, skipping the decode and forward NTT at runtime:
 //!
 //! ```ignore
 //! use solana_falcon512::{Falcon512Pubkey, Falcon512PreparedPubkey};
@@ -34,6 +32,11 @@
 //!
 //! let ok = signature.verify_with_prepared(message, &PREPARED);
 //! ```
+//!
+//! Set `Falcon512Pubkey::<true>` to use TurboSHAKE256 with domain `0x1f`
+//! for hash-to-point. This is a nonstandard variant requiring a matching
+//! signer. Key and prepared-key bytes are unchanged and do not encode the
+//! mode; the application must associate it with the key.
 //!
 //! # Compatibility
 //!
@@ -63,7 +66,6 @@
 use solana_program_error::ProgramError;
 
 mod codec;
-mod keccak;
 mod ntt;
 
 #[cfg(kani)]
@@ -118,14 +120,19 @@ const _: () = assert!(L2_BOUND < ((Q as u64 / 2) * (Q as u64 / 2) + 2047u64 * 20
 /// Wire-encoded Falcon-512 public key (header byte `0x09` + 14-bit-packed
 /// polynomial `h ∈ Z_q[x] / (x^512 + 1)`).
 ///
+/// `TURBO = false` uses standard Falcon SHAKE256. `true` uses TurboSHAKE256
+/// with domain `0x1f` for hash-to-point, a nonstandard signature variant
+/// requiring a matching signer. Key generation and key bytes are identical.
+/// The encoding does not record the mode; the caller must bind it to the key.
+///
 /// `#[repr(transparent)]` so a `&[u8; FALCON_512_PUBKEY_LEN]` can be
 /// re-borrowed as a `&Falcon512Pubkey` without a copy via
 /// [`Falcon512Pubkey::from_ref`].
 #[derive(Clone, Eq, PartialEq)]
 #[repr(transparent)]
-pub struct Falcon512Pubkey([u8; FALCON_512_PUBKEY_LEN]);
+pub struct Falcon512Pubkey<const TURBO: bool = false>([u8; FALCON_512_PUBKEY_LEN]);
 
-impl TryFrom<&[u8]> for Falcon512Pubkey {
+impl<const TURBO: bool> TryFrom<&[u8]> for Falcon512Pubkey<TURBO> {
     type Error = ProgramError;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
@@ -136,13 +143,13 @@ impl TryFrom<&[u8]> for Falcon512Pubkey {
     }
 }
 
-impl From<[u8; FALCON_512_PUBKEY_LEN]> for Falcon512Pubkey {
+impl<const TURBO: bool> From<[u8; FALCON_512_PUBKEY_LEN]> for Falcon512Pubkey<TURBO> {
     fn from(value: [u8; FALCON_512_PUBKEY_LEN]) -> Self {
         Self(value)
     }
 }
 
-impl Falcon512Pubkey {
+impl<const TURBO: bool> Falcon512Pubkey<TURBO> {
     /// Borrow a `&[u8; FALCON_512_PUBKEY_LEN]` as a `&Falcon512Pubkey` with
     /// no copy. Useful when the pubkey bytes already live somewhere (e.g.
     /// a Solana account) and you want to avoid a 897-byte memcpy.
@@ -178,7 +185,7 @@ impl Falcon512Pubkey {
 
     /// Decode the pubkey polynomial and run a forward NTT, returning a form
     /// that lets [`Falcon512Signature::verify_with_prepared`] skip the per-call
-    /// decode and forward NTT (saves ~99k CUs on Solana SBF).
+    /// decode and forward NTT.
     ///
     /// `const fn`, so consumer programs can embed the prepared pubkey as a
     /// `const` and pay zero runtime setup cost.
@@ -192,7 +199,7 @@ impl Falcon512Pubkey {
     /// pubkeys, prefer [`Self::try_prepare_pubkey`] which returns
     /// `Result<_, ProgramError>` instead of panicking, or
     /// [`Falcon512Signature::verify`] which never panics.
-    pub const fn prepare_pubkey(&self) -> Falcon512PreparedPubkey {
+    pub const fn prepare_pubkey(&self) -> Falcon512PreparedPubkey<TURBO> {
         let bytes = &self.0;
         assert!(bytes[0] == PUBKEY_HEADER, "invalid pubkey header");
 
@@ -249,7 +256,7 @@ impl Falcon512Pubkey {
     /// `prepare_pubkey` (panicking, `const`) is preferred when the pubkey is
     /// known at compile time, since the work runs at build time and any
     /// failure becomes a compile error.
-    pub fn try_prepare_pubkey(&self) -> Result<Falcon512PreparedPubkey, ProgramError> {
+    pub fn try_prepare_pubkey(&self) -> Result<Falcon512PreparedPubkey<TURBO>, ProgramError> {
         let bytes = &self.0;
         if bytes[0] != PUBKEY_HEADER {
             return Err(ProgramError::InvalidArgument);
@@ -271,24 +278,24 @@ impl Falcon512Pubkey {
     }
 }
 
-impl TryFrom<Falcon512Pubkey> for Falcon512PreparedPubkey {
+impl<const TURBO: bool> TryFrom<Falcon512Pubkey<TURBO>> for Falcon512PreparedPubkey<TURBO> {
     type Error = ProgramError;
 
     /// Decode + forward-NTT the wire pubkey into the runtime "prepared" form,
     /// surfacing malformed input as `Err(InvalidArgument)`. Same work as
     /// [`Falcon512Pubkey::try_prepare_pubkey`].
-    fn try_from(value: Falcon512Pubkey) -> Result<Self, Self::Error> {
+    fn try_from(value: Falcon512Pubkey<TURBO>) -> Result<Self, Self::Error> {
         value.try_prepare_pubkey()
     }
 }
 
-impl TryFrom<&Falcon512Pubkey> for Falcon512PreparedPubkey {
+impl<const TURBO: bool> TryFrom<&Falcon512Pubkey<TURBO>> for Falcon512PreparedPubkey<TURBO> {
     type Error = ProgramError;
 
     /// Borrowed-input version of [`TryFrom<Falcon512Pubkey>`]: useful when
     /// the wire pubkey already lives in account data and you don't want to
     /// move/copy it just to prepare.
-    fn try_from(value: &Falcon512Pubkey) -> Result<Self, Self::Error> {
+    fn try_from(value: &Falcon512Pubkey<TURBO>) -> Result<Self, Self::Error> {
         value.try_prepare_pubkey()
     }
 }
@@ -298,20 +305,23 @@ impl TryFrom<&Falcon512Pubkey> for Falcon512PreparedPubkey {
 /// The `N_INV` scaling that the inverse NTT normally needs at the end is
 /// also pre-folded in. Stored as `u16` since every coefficient is `< Q < 2^14`.
 ///
+/// `TURBO` selects the same hash-to-point mode as [`Falcon512Pubkey`].
+/// Prepared bytes are identical in both modes and do not encode the choice.
+///
 /// Construct from a [`Falcon512Pubkey`] via [`Falcon512Pubkey::prepare_pubkey`]
 /// (which can run in `const` context), or from a 1024-byte serialised buffer
 /// via [`Falcon512PreparedPubkey::from_bytes`] / [`as_bytes`](Self::as_bytes).
 /// Storing the serialised form on-chain costs 1024 bytes of account data but
-/// lets repeated verifies skip the ~99k-CU NTT prep on every call.
+/// lets repeated verifies skip the decode and forward NTT on every call.
 ///
 /// `#[repr(transparent)]` so a `&[u16; N]` can be re-borrowed as a
 /// `&Falcon512PreparedPubkey` without a copy via
 /// [`Falcon512PreparedPubkey::from_ref`].
 #[derive(Clone, Eq, PartialEq)]
 #[repr(transparent)]
-pub struct Falcon512PreparedPubkey([u16; N]);
+pub struct Falcon512PreparedPubkey<const TURBO: bool = false>([u16; N]);
 
-impl Falcon512PreparedPubkey {
+impl<const TURBO: bool> Falcon512PreparedPubkey<TURBO> {
     /// Borrow a `&[u8; FALCON_512_PREPARED_PUBKEY_LEN]` as a
     /// `&Falcon512PreparedPubkey` with no copy. Useful when the prepared
     /// pubkey lives in a Solana account: skips a 1024-byte memcpy that
@@ -438,7 +448,7 @@ impl Falcon512PreparedPubkey {
     }
 }
 
-impl TryFrom<&[u8]> for Falcon512PreparedPubkey {
+impl<const TURBO: bool> TryFrom<&[u8]> for Falcon512PreparedPubkey<TURBO> {
     type Error = ProgramError;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
@@ -522,7 +532,11 @@ impl Falcon512Signature {
     /// panics. Distinguishing the failure reason is intentionally unsupported
     /// since outside of debugging it usually doesn't matter.
     #[inline(never)]
-    pub fn verify_with_prepared(&self, message: &[u8], prepared: &Falcon512PreparedPubkey) -> bool {
+    pub fn verify_with_prepared<const TURBO: bool>(
+        &self,
+        message: &[u8],
+        prepared: &Falcon512PreparedPubkey<TURBO>,
+    ) -> bool {
         let sig = &self.0;
         if sig[0] != SIG_HEADER {
             return false;
@@ -551,7 +565,7 @@ impl Falcon512Signature {
         // `c_p..c_end` pointer (no reads from `c`), and always returns with
         // `c_p == c_end` so all N slots are initialised on return.
         let c_ref: &mut [u16; N] = unsafe { &mut *(c_buf.as_mut_ptr() as *mut [u16; N]) };
-        codec::hash_to_point(nonce, message, c_ref);
+        codec::hash_to_point::<TURBO>(nonce, message, c_ref);
 
         norm_check_with_prepared(&prepared.0, s2_ref, c_ref)
     }
@@ -563,7 +577,11 @@ impl Falcon512Signature {
     /// Returns `false` on any failure mode (wrong header, malformed pubkey
     /// or signature, norm bound exceeded). Never panics.
     #[inline(never)]
-    pub fn verify(&self, message: &[u8], pubkey: &Falcon512Pubkey) -> bool {
+    pub fn verify<const TURBO: bool>(
+        &self,
+        message: &[u8],
+        pubkey: &Falcon512Pubkey<TURBO>,
+    ) -> bool {
         let sig = &self.0;
         let pk = &pubkey.0;
 
@@ -580,7 +598,7 @@ impl Falcon512Signature {
         }
 
         let mut c = [0u16; N];
-        codec::hash_to_point(nonce, message, &mut c);
+        codec::hash_to_point::<TURBO>(nonce, message, &mut c);
 
         check_norm(&pk[1..], &s2, &c)
     }

@@ -4,8 +4,8 @@ Pure-Rust **Falcon-512 signature verification**, optimised for Solana SBF progra
 
 - `no_std`, allocation-free, zero non-essential dependencies.
 - Compressed-format signatures (header byte `0x39`) only.
-- **~173–183k compute units per verify** on Solana SBF with a prepared pubkey
-  (rejection sampling is not constant-time — see [Benchmarks](#benchmarks)).
+- **~175k CUs with SHAKE256, ~133k with TurboSHAKE256** using a prepared
+  pubkey in the fixed [benchmark](#benchmarks).
 - Zero-copy borrow APIs (`from_ref`, `try_from_slice`) so signatures and prepared pubkeys can be verified directly from runtime input / account data with no memcpy.
 - Prepared pubkey storage: **1024 bytes** (one u16 per NTT coefficient, since each value is `< Q < 2^14`).
 - Cross-checked against NIST SHAKE-256 KATs and 1,000,000 PQClean-generated signatures with zero failures.
@@ -17,14 +17,33 @@ Pure-Rust **Falcon-512 signature verification**, optimised for Solana SBF progra
 ```rust
 use solana_falcon512::{Falcon512Pubkey, Falcon512Signature};
 
-let pubkey = Falcon512Pubkey::try_from(&pk_bytes[..])?;
+let pubkey = Falcon512Pubkey::<false>::try_from(&pk_bytes[..])?;
 let signature = Falcon512Signature::try_from(&sig_bytes[..])?;
 let ok = signature.verify(message, &pubkey);
 ```
 
+### TurboSHAKE
+
+The public-key types take `const TURBO: bool = false`. Select `true` to use
+TurboSHAKE256 with domain `0x1f` for hash-to-point:
+
+```rust
+let pubkey = Falcon512Pubkey::<true>::try_from(&pk_bytes[..])?;
+let prepared = pubkey.try_prepare_pubkey()?;
+let ok = signature.verify_with_prepared(message, &prepared);
+```
+
+This is a **nonstandard Falcon variant** requiring a signer with the same
+hash-to-point change. Ordinary Falcon signatures use the default SHAKE256
+mode. Key generation, public-key bytes and prepared-key bytes are unchanged;
+the application must associate the mode with the key, since the bytes do not
+encode it. This crate only implements verification.
+
+The dependency is pinned to the new [`solana-shake` API](https://github.com/blueshift-gg/solana-shake/pull/1).
+
 ### Compile-time prepared pubkey (recommended for Solana programs)
 
-If your program embeds a fixed pubkey, prepare it at compile time. `prepare_pubkey()` is a `const fn` — the decoded NTT-form pubkey is baked into the binary, saving ~99k CUs on every verify:
+If your program embeds a fixed pubkey, prepare it at compile time. `prepare_pubkey()` is a `const fn` — the decoded NTT-form pubkey is baked into the binary, skipping the decode and forward NTT on every verify:
 
 ```rust
 use solana_falcon512::{Falcon512Pubkey, Falcon512PreparedPubkey, Falcon512Signature};
@@ -43,7 +62,7 @@ A malformed pubkey will fail at compile time rather than panic at runtime.
 If your program verifies against a different pubkey per account/user — i.e.
 the pubkey isn't known at compile time — store the **prepared** form on-chain
 instead of the raw 897-byte wire encoding. Each verify then loads the NTT-form
-pubkey directly and skips the ~99k-CU decode + forward NTT.
+pubkey directly and skips the decode and forward NTT.
 
 The trade-off is 1024 bytes of account data instead of 897 bytes (about
 127 bytes extra rent per account). Anything that gets verified multiple times
@@ -65,7 +84,7 @@ use solana_falcon512::{
 
 // On registration: prepare once, write the 1024-byte form into the account.
 // Either of these forms works:
-let pk = Falcon512Pubkey::try_from(&pk_wire_bytes[..])?;
+let pk = Falcon512Pubkey::<false>::try_from(&pk_wire_bytes[..])?;
 let prepared: Falcon512PreparedPubkey = (&pk).try_into()?;        // TryFrom
 // or, equivalently:
 let prepared = pk.try_prepare_pubkey()?;                            // method
@@ -74,7 +93,7 @@ account_data.copy_from_slice(prepared.as_bytes());
 // On verify: borrow the prepared pubkey directly out of account data — no
 // copy, no allocation. `try_from_slice` validates length + 2-byte alignment
 // (Solana account data is 8-byte aligned by ABI, so this always passes).
-let prepared = Falcon512PreparedPubkey::try_from_slice(&account_data[..])?;
+let prepared = Falcon512PreparedPubkey::<false>::try_from_slice(&account_data[..])?;
 let signature = Falcon512Signature::try_from_slice(sig_bytes)?;
 let ok = signature.verify_with_prepared(message, prepared);
 ```
@@ -93,8 +112,8 @@ let prepared: &Falcon512PreparedPubkey =
 
 // From a slice (length checked + alignment checked, still no copy):
 let sig      = Falcon512Signature::try_from_slice(&sig_slice)?;
-let pk       = Falcon512Pubkey::try_from_slice(&pk_slice)?;
-let prepared = Falcon512PreparedPubkey::try_from_slice(&pp_slice)?;
+let pk       = Falcon512Pubkey::<false>::try_from_slice(&pk_slice)?;
+let prepared = Falcon512PreparedPubkey::<false>::try_from_slice(&pp_slice)?;
 ```
 
 The Solana entrypoint pattern below avoids the 666-byte signature memcpy and
@@ -127,7 +146,7 @@ work into account data and skip it on every verify.
 Three transformations baked into `Falcon512PreparedPubkey`:
 
 1. **Decode + forward NTT** of `h`, eliminating the per-verify 14-bit
-   unpacking and 9-level NTT (~95k CUs saved per verify).
+   unpacking and 9-level NTT.
 2. **Pre-fold `N⁻¹ mod q`** into each coefficient. The inverse NTT
    normally ends with a `× (1/N)` scalar pass; pre-folding lets the
    runtime skip it. `inv_NTT(prepared · NTT(s2)) = (h · s2 · N) · N⁻¹ =
@@ -148,42 +167,17 @@ many verifications throughout the lifetime of the pubkey.
 
 ## Benchmarks
 
-Measured via Mollusk SVM, default optimised build (`lto = "fat"`,
-`opt-level = 3`, `codegen-units = 1`), with the entrypoint borrowing the
-signature in place via `Falcon512Signature::from_ref`:
+Measured with `cargo build-sbf --arch v3` (cargo-build-sbf 4.2.0,
+platform-tools v1.56) and Mollusk 0.15.1, using the checked-in signatures,
+41-byte message and embedded 1024-byte prepared key:
 
-| Path                                 | CUs            |
-| ------------------------------------ | -------------- |
-| `verify_with_prepared` (success)     | ~173k–183k     |
-| `verify_with_prepared` (rejection)   | ~173k–183k     |
-| `verify` (raw pubkey)                | ~270k          |
+| Hash-to-point | CUs |
+| --- | ---: |
+| SHAKE256 | 174,931 |
+| TurboSHAKE256 (`D = 0x1f`) | 132,742 |
 
-The CU range for `verify_with_prepared` reflects per-signature variance
-in `hash_to_point`: each Falcon signature embeds a fresh random nonce, and
-SHAKE-256 rejection sampling in `hash_to_point` consumes a variable number
-of permutations depending on how many `< 5q` candidates land in each
-absorbed block (typically 8–10 permutations, ~95% of the variance). The
-algorithm work is identical; only the keccak count differs. A safe
-compute-unit budget for the prepared path is
-`set_compute_unit_limit(195_000)`.
-
-Notable points along the optimisation curve (start of the journey vs. now,
-`verify_with_prepared`):
-
-| Stage                                                                        | CUs      |
-| ---------------------------------------------------------------------------- | -------- |
-| Naive port                                                                   | ~283k    |
-| u64-throughout NTT butterflies                                               | 265k     |
-| `assert_unchecked` for SBF bounds-check elision                              | 248k     |
-| Lazy-reduction (drop intermediate `% q` where the next mul·zeta·% q absorbs) | 222k     |
-| Fuse inv-NTT last level with L2-norm loop                                    | 213k     |
-| Pre-fold `N_INV` into prepared pubkey                                        | 209k     |
-| Lazy-`t` at last forward NTT level                                           | 196k     |
-| Zero-copy `from_ref` for signature in entrypoint                             | 196k     |
-| chi-row + chi-row-iota Keccak layout                                         | 195k     |
-| Bertoni 6-lane lane-complementing                                            | 187k     |
-| In-place chi-row + 10 cell-saves (no `B[25]` scratch)                        | 183k     |
-| `#[inline(always)]` on hot helpers (`ntt_levels_after_first`, etc.)          | **183k** |
+These are fixed-fixture measurements. Compute varies with message length,
+rejection sampling and invalid-signature rejection paths.
 
 ## Project layout
 
@@ -198,11 +192,11 @@ Notable points along the optimisation curve (start of the journey vs. now,
 ## Testing
 
 ```sh
-cargo test --workspace                              # lib unit + e2e + fuzz
-cargo test --workspace --release -- --ignored       # 100k-iter soak (~40s),
-                                                    # plus PQClean differential and
-                                                    # 10M-iter random-rejection soak
-(cd program && cargo test-sbf)                      # SBF tests via Mollusk
+cargo test --locked --release --lib -p solana-falcon512
+cargo test --locked --release -p host-tests
+cargo test --locked --doc
+cargo build-sbf --arch v3 --manifest-path program/Cargo.toml
+cargo test --locked -p program --test tests -- --nocapture
 ```
 
 The e2e tests include a `prepared_pubkey_roundtrip_matches_direct_verify`

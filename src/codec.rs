@@ -32,10 +32,7 @@ pub fn decode_pubkey_u32(buf: &[u8], h: &mut [u32; N]) -> bool {
             idx_out += 1;
         }
     }
-    if (acc & ((1u64 << acc_len) - 1)) != 0 {
-        return false;
-    }
-    true
+    (acc & ((1u64 << acc_len) - 1)) == 0
 }
 
 /// Decode one Golomb-Rice-encoded `s2` coefficient from `buf`, advancing the

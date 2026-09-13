@@ -300,72 +300,51 @@ macro_rules! gs_butterfly_lazy {
 // loop and worth hundreds of CUs across the full NTT.
 #[inline(always)]
 pub(crate) const fn ntt_levels_after_first(r: &mut [u32; N]) {
-    let mut k: usize = 2;
-
-    // Levels with len = N/4, N/8, ..., 16: inner butterfly loop unrolled by 8.
-    let mut len = N / 4;
-    while len >= 16 {
-        let mut start = 0;
-        while start < N {
-            // SAFETY: start + 2*len <= N. start steps by 2*len starting at 0,
-            // and 2*len divides N, so start ≤ N - 2*len exactly.
-            unsafe { core::hint::assert_unchecked(start + 2 * len <= N) };
-            let zeta = ZETAS[k] as u64;
-            k += 1;
-            let mut j = start;
-            let end = start + len;
-            while j < end {
-                // SAFETY: j ranges over [start, start+len), unrolled by 8, so
-                // j + 7 + len <= start + 2*len ≤ N — every access stays in.
-                unsafe { core::hint::assert_unchecked(j + 7 + len < N) };
-                ct_butterfly!(r, j, len, zeta);
-                ct_butterfly!(r, j + 1, len, zeta);
-                ct_butterfly!(r, j + 2, len, zeta);
-                ct_butterfly!(r, j + 3, len, zeta);
-                ct_butterfly!(r, j + 4, len, zeta);
-                ct_butterfly!(r, j + 5, len, zeta);
-                ct_butterfly!(r, j + 6, len, zeta);
-                ct_butterfly!(r, j + 7, len, zeta);
-                j += 8;
+    // Compose two levels before storing. Each four-coefficient group uses
+    // one parent twiddle and its two children; lazy bounds are unchanged.
+    macro_rules! layers {
+        ($len:expr) => {{
+            let mut k = N / (2 * $len);
+            let mut start = 0;
+            while start < N {
+                let z = ZETAS[k] as u64;
+                let z0 = ZETAS[2 * k] as u64;
+                let z1 = ZETAS[2 * k + 1] as u64;
+                macro_rules! pair {
+                    ($j:expr) => {{
+                        // Each level partitions [0, N); j is in the first quarter.
+                        unsafe { core::hint::assert_unchecked($j + 3 * ($len / 2) < N) };
+                        let (a, c) = ct_butterfly_step(r[$j] as u64, r[$j + $len] as u64, z);
+                        let (b, d) = ct_butterfly_step(
+                            r[$j + $len / 2] as u64,
+                            r[$j + 3 * ($len / 2)] as u64,
+                            z,
+                        );
+                        let (a, b) = ct_butterfly_step(a, b, z0);
+                        let (c, d) = ct_butterfly_step(c, d, z1);
+                        r[$j] = a as u32;
+                        r[$j + $len / 2] = b as u32;
+                        r[$j + $len] = c as u32;
+                        r[$j + 3 * ($len / 2)] = d as u32;
+                    }};
+                }
+                let mut j = start;
+                while j < start + $len / 2 {
+                    pair!(j);
+                    pair!(j + 1);
+                    pair!(j + 2);
+                    pair!(j + 3);
+                    j += 4;
+                }
+                start += 2 * $len;
+                k += 1;
             }
-            start += 2 * len;
-        }
-        len /= 2;
+        }};
     }
-
-    // Level len=8: 32 outer iters, 8 inline butterflies each.
-    {
-        let mut start = 0;
-        while start < N {
-            unsafe { core::hint::assert_unchecked(start + 16 <= N) };
-            let zeta = ZETAS[k] as u64;
-            k += 1;
-            ct_butterfly!(r, start, 8, zeta);
-            ct_butterfly!(r, start + 1, 8, zeta);
-            ct_butterfly!(r, start + 2, 8, zeta);
-            ct_butterfly!(r, start + 3, 8, zeta);
-            ct_butterfly!(r, start + 4, 8, zeta);
-            ct_butterfly!(r, start + 5, 8, zeta);
-            ct_butterfly!(r, start + 6, 8, zeta);
-            ct_butterfly!(r, start + 7, 8, zeta);
-            start += 16;
-        }
-    }
-
-    // Level len=4: 64 outer iters, 4 inline butterflies each.
-    {
-        let mut start = 0;
-        while start < N {
-            unsafe { core::hint::assert_unchecked(start + 8 <= N) };
-            let zeta = ZETAS[k] as u64;
-            k += 1;
-            ct_butterfly!(r, start, 4, zeta);
-            ct_butterfly!(r, start + 1, 4, zeta);
-            ct_butterfly!(r, start + 2, 4, zeta);
-            ct_butterfly!(r, start + 3, 4, zeta);
-            start += 8;
-        }
-    }
+    layers!(128);
+    layers!(32);
+    layers!(8);
+    let mut k = N / 4;
 
     // Level len=2: 128 outer iters, 2 butterflies each. Outer-unroll by 2.
     // This is the *last* main forward level, so we use the lazy-t variant
@@ -513,83 +492,53 @@ const fn inv_ntt_first_level(r: &mut [u32; N]) {
     }
 }
 
-// Inverse NTT levels with len = 2 up to len = N/2, plus the final 1/N
-// scaling. Used both as the back half of `inv_ntt()` and standalone after
-// the fused last-fwd / pointwise / first-inv path has produced the buffer
-// already in post-len=1 state.
+// Inverse NTT levels len=2 through len=128, without 1/N scaling.
+// The input is already in post-len=1 state; the final len=256 level is
+// fused with norm accumulation in production.
 pub const fn inv_ntt_main_levels(r: &mut [u32; N]) {
-    // All non-last levels use the *lazy* GS variant: low-half `(u + v)` is
-    // stored without `% q`. The high half's `* zeta % q` keeps it reduced,
-    // and the next level's high-half `* zeta % q` (or, after level 7, the
-    // last-level fused-norm path) absorbs any un-reduction. Per-level
-    // values double; level 7's worst-case is ~128·Q which still fits u32,
-    // and the lazy macro adds 128·Q (a multiple of q) before the subtract
-    // to prevent underflow with that worst-case `v`.
-
-    // Level len=2: 128 outer iters, 2 butterflies each. Outer-unroll by 2.
-    {
-        let mut i = 0;
-        while i < N / 4 {
-            let s = 4 * i;
-            unsafe { core::hint::assert_unchecked(s + 8 <= N) };
-            let zeta_a = INV_ZETAS[N / 4 + i] as u64;
-            let zeta_b = INV_ZETAS[N / 4 + i + 1] as u64;
-            gs_butterfly_lazy!(r, s, 2, zeta_a);
-            gs_butterfly_lazy!(r, s + 1, 2, zeta_a);
-            gs_butterfly_lazy!(r, s + 4, 2, zeta_b);
-            gs_butterfly_lazy!(r, s + 5, 2, zeta_b);
-            i += 2;
-        }
+    // Two GS levels per group; the same lazy offsets and bounds apply.
+    macro_rules! layers {
+        ($len:expr) => {{
+            let mut k = N / (4 * $len);
+            let mut start = 0;
+            while start < N {
+                let z0 = INV_ZETAS[2 * k] as u64;
+                let z1 = INV_ZETAS[2 * k + 1] as u64;
+                let z = INV_ZETAS[k] as u64;
+                macro_rules! pair {
+                    ($j:expr) => {{
+                        // Each level partitions [0, N); j is in the first quarter.
+                        unsafe { core::hint::assert_unchecked($j + 3 * $len < N) };
+                        let (a, b) = gs_butterfly_lazy_step(r[$j] as u64, r[$j + $len] as u64, z0);
+                        let (c, d) = gs_butterfly_lazy_step(
+                            r[$j + 2 * $len] as u64,
+                            r[$j + 3 * $len] as u64,
+                            z1,
+                        );
+                        let (a, c) = gs_butterfly_lazy_step(a, c, z);
+                        let (b, d) = gs_butterfly_lazy_step(b, d, z);
+                        r[$j] = a as u32;
+                        r[$j + $len] = b as u32;
+                        r[$j + 2 * $len] = c as u32;
+                        r[$j + 3 * $len] = d as u32;
+                    }};
+                }
+                let mut j = start;
+                while j < start + $len {
+                    pair!(j);
+                    pair!(j + 1);
+                    j += 2;
+                }
+                start += 4 * $len;
+                k += 1;
+            }
+        }};
     }
-
-    // Level len=4: 64 outer iters, 4 inline butterflies each (no inner loop).
-    {
-        let mut i = 0;
-        while i < N / 8 {
-            let k = N / 8 + i;
-            let start = 8 * i;
-            unsafe { core::hint::assert_unchecked(start + 8 <= N) };
-            let zeta = INV_ZETAS[k] as u64;
-            gs_butterfly_lazy!(r, start, 4, zeta);
-            gs_butterfly_lazy!(r, start + 1, 4, zeta);
-            gs_butterfly_lazy!(r, start + 2, 4, zeta);
-            gs_butterfly_lazy!(r, start + 3, 4, zeta);
-            i += 1;
-        }
-    }
-
-    // Level len=8: 32 outer iters, 8 inline butterflies each.
-    {
-        let mut i = 0;
-        while i < N / 16 {
-            let k = N / 16 + i;
-            let start = 16 * i;
-            unsafe { core::hint::assert_unchecked(start + 16 <= N) };
-            let zeta = INV_ZETAS[k] as u64;
-            gs_butterfly_lazy!(r, start, 8, zeta);
-            gs_butterfly_lazy!(r, start + 1, 8, zeta);
-            gs_butterfly_lazy!(r, start + 2, 8, zeta);
-            gs_butterfly_lazy!(r, start + 3, 8, zeta);
-            gs_butterfly_lazy!(r, start + 4, 8, zeta);
-            gs_butterfly_lazy!(r, start + 5, 8, zeta);
-            gs_butterfly_lazy!(r, start + 6, 8, zeta);
-            gs_butterfly_lazy!(r, start + 7, 8, zeta);
-            i += 1;
-        }
-    }
-
-    // Levels with 16 <= len < N/2: inner unrolled by 8. The N_INV scaling that
-    // an inverse NTT normally needs at the end is pre-folded into the
-    // prepared pubkey at compile time (see `Falcon512Pubkey::prepare_pubkey`),
-    // so the back half of `inv_NTT(fwd_NTT(s2) * h_pk_NTT)` produces the
-    // correct (un-scaled) coefficients directly.
-    //
-    // The final level (len = N/2) is intentionally *omitted* here: production
-    // does it inside `last_level_fused_norm` below, fused with the L2-norm
-    // accumulation, so the 512-element pass writing buf and the 512-element
-    // pass reading buf back collapse into one. The standalone test path
-    // (`inv_ntt`) calls `last_level` separately.
-    let mut len = 16;
+    layers!(2);
+    layers!(8);
+    layers!(32);
+    // The final len=256 layer remains fused with norm accumulation.
+    let mut len = 128;
     while len < N / 2 {
         let butts = N / (2 * len);
         let k_base = butts;

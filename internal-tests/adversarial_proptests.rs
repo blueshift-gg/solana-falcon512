@@ -63,7 +63,7 @@ proptest! {
             let mut sig = [0u8; crate::FALCON_512_SIGNATURE_LEN];
             sig[0] = header;
             let sig = crate::Falcon512Signature::from_bytes(sig);
-            let prepared = crate::Falcon512PreparedPubkey::from_bytes(
+            let prepared = crate::Falcon512PreparedPubkey::<false>::from_bytes(
                 [0u8; crate::FALCON_512_PREPARED_PUBKEY_LEN],
             );
             prop_assert!(!sig.verify_with_prepared(b"test", &prepared),
@@ -77,7 +77,7 @@ proptest! {
         if header != 0x09 {
             let mut pk_bytes = [0u8; crate::FALCON_512_PUBKEY_LEN];
             pk_bytes[0] = header;
-            let pk = crate::Falcon512Pubkey::from_bytes(pk_bytes);
+            let pk = crate::Falcon512Pubkey::<false>::from_bytes(pk_bytes);
             // Need valid sig header to reach pk check:
             let mut sig_bytes = [0u8; crate::FALCON_512_SIGNATURE_LEN];
             sig_bytes[0] = 0x39;
@@ -96,7 +96,7 @@ proptest! {
         let mut bytes = [0u8; crate::FALCON_512_PREPARED_PUBKEY_LEN];
         bytes[2 * pos] = (coeff & 0xFF) as u8;
         bytes[2 * pos + 1] = (coeff >> 8) as u8;
-        let pk = crate::Falcon512PreparedPubkey::from_bytes(bytes);
+        let pk = crate::Falcon512PreparedPubkey::<false>::from_bytes(bytes);
         prop_assert!(!pk.validate(),
             "validate should reject coeff {} at pos {}", coeff, pos);
     }
@@ -129,7 +129,7 @@ proptest! {
             pk_bytes[idx] = (acc << (8 - acc_len)) as u8;
         }
 
-        let pk = crate::Falcon512Pubkey::from_bytes(pk_bytes);
+        let pk = crate::Falcon512Pubkey::<false>::from_bytes(pk_bytes);
         let prepared = pk.prepare_pubkey();
         prop_assert!(prepared.validate(),
             "prepared pubkey from prepare_pubkey() should always validate");
@@ -145,7 +145,7 @@ proptest! {
         let mut data = vec![0u8; crate::FALCON_512_PREPARED_PUBKEY_LEN];
         data[2 * pos] = (coeff & 0xFF) as u8;
         data[2 * pos + 1] = (coeff >> 8) as u8;
-        let result = crate::Falcon512PreparedPubkey::try_from_slice(&data);
+        let result = crate::Falcon512PreparedPubkey::<false>::try_from_slice(&data);
         prop_assert!(result.is_err(),
             "try_from_slice should reject coeff {} at pos {}", coeff, pos);
     }

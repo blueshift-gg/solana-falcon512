@@ -13,14 +13,13 @@ use super::*;
 // site without thousands of iterations.
 //
 // Coverage:
-//   - `Falcon512Pubkey::from_ref` repr-transparent cast
+//   - `Falcon512Pubkey::<false>::from_ref` repr-transparent cast
 //   - `Falcon512Signature::from_ref` repr-transparent cast
 //   - `MaybeUninit` patterns in `verify_with_prepared` and
 //     `norm_check_with_prepared`
 //   - `decompress_signature`'s `read_unaligned` u64 trailing scan
 //   - `hash_to_point`'s raw-pointer walk over the rate lanes and `c[]`
-//   - `Falcon512PreparedPubkey::from_ref` alignment-required cast
-
+//   - `Falcon512PreparedPubkey::<false>::from_ref` alignment-required cast
 
 // Embed a known-good (pubkey, signature, message) triple so we can run
 // a real verify path through Miri without needing PQClean.
@@ -31,9 +30,31 @@ static SIG_BYTES: &[u8; FALCON_512_SIGNATURE_LEN] =
 const MESSAGE: &[u8] = b"deterministic falcon-512 verify benchmark";
 
 #[test]
+fn turbo_fixture_and_mode_separation() {
+    // PQClean sign_dyn/verify_raw from pqcrypto-falcon 0.4.1, using
+    // Noble hashes 2.4.0 TurboSHAKE256 for hash-to-point (D=0x1f, nonce 0..39).
+    let turbo_sig =
+        Falcon512Signature::from_ref(include_bytes!("../program/tests/fixtures/turbo_sig.bin"));
+    let standard_sig = Falcon512Signature::from_ref(SIG_BYTES);
+    let standard = Falcon512Pubkey::<false>::from_ref(PK_BYTES);
+    let turbo = Falcon512Pubkey::<true>::from_ref(PK_BYTES);
+    let standard_prepared = standard.prepare_pubkey();
+    let turbo_prepared = turbo.prepare_pubkey();
+    assert_eq!(standard_prepared.as_bytes(), turbo_prepared.as_bytes());
+    assert!(turbo_sig.verify(MESSAGE, turbo));
+    assert!(turbo_sig.verify_with_prepared(MESSAGE, &turbo_prepared));
+    assert!(!turbo_sig.verify(MESSAGE, standard));
+    assert!(!turbo_sig.verify_with_prepared(MESSAGE, &standard_prepared));
+    assert!(!standard_sig.verify(MESSAGE, turbo));
+    assert!(!standard_sig.verify_with_prepared(MESSAGE, &turbo_prepared));
+    assert!(!turbo_sig.verify(b"tampered", turbo));
+    assert!(!turbo_sig.verify_with_prepared(b"tampered", &turbo_prepared));
+}
+
+#[test]
 fn verify_path_exercises_unsafe() {
     // Path 1: `from_ref` (repr-transparent cast) on both buffers.
-    let pk: &Falcon512Pubkey = Falcon512Pubkey::from_ref(PK_BYTES);
+    let pk: &Falcon512Pubkey = Falcon512Pubkey::<false>::from_ref(PK_BYTES);
     let sig: &Falcon512Signature = Falcon512Signature::from_ref(SIG_BYTES);
     // Path 2: raw `verify` — exercises `check_norm` -> NTT decode +
     // forward NTT + N_INV fold + norm.
@@ -44,7 +65,7 @@ fn verify_path_exercises_unsafe() {
 fn verify_with_prepared_path_exercises_unsafe() {
     // Path 3: `prepare_pubkey` (const fn, no unsafe but exercises
     // the `MaybeUninit` work below).
-    let pk = Falcon512Pubkey::from(*PK_BYTES);
+    let pk = Falcon512Pubkey::<false>::from(*PK_BYTES);
     let prepared = pk.prepare_pubkey();
     // Path 4: `verify_with_prepared` — exercises `MaybeUninit` in
     // `s2_buf` / `c_buf` and the `MaybeUninit` in
@@ -55,13 +76,13 @@ fn verify_with_prepared_path_exercises_unsafe() {
 
 #[test]
 fn prepared_pubkey_aligned_borrow_exercises_unsafe() {
-    // Path 5: `Falcon512PreparedPubkey::try_from_slice` — exercises
+    // Path 5: `Falcon512PreparedPubkey::<false>::try_from_slice` — exercises
     // `from_ref` (which has an unsafe alignment-required cast).
-    let pk = Falcon512Pubkey::from(*PK_BYTES);
+    let pk = Falcon512Pubkey::<false>::from(*PK_BYTES);
     let prepared = pk.prepare_pubkey();
     let bytes = prepared.as_bytes(); // exercises another transparent cast
-    let borrowed =
-        Falcon512PreparedPubkey::try_from_slice(bytes).expect("prepared bytes must validate");
+    let borrowed = Falcon512PreparedPubkey::<false>::try_from_slice(bytes)
+        .expect("prepared bytes must validate");
     // Use it: verify against the borrowed form too.
     let sig: &Falcon512Signature = Falcon512Signature::from_ref(SIG_BYTES);
     assert!(sig.verify_with_prepared(MESSAGE, borrowed));

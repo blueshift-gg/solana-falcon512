@@ -180,7 +180,7 @@ fn validate_rejects_out_of_range() {
     bytes[2 * pos] = (coeff & 0xFF) as u8;
     bytes[2 * pos + 1] = (coeff >> 8) as u8;
 
-    let pk = crate::Falcon512PreparedPubkey::from_bytes(bytes);
+    let pk = crate::Falcon512PreparedPubkey::<false>::from_bytes(bytes);
     assert!(!pk.validate(), "validate should reject coefficient >= Q");
 }
 
@@ -201,7 +201,7 @@ fn validate_accepts_valid() {
     bytes[2 * pos] = (coeff & 0xFF) as u8;
     bytes[2 * pos + 1] = (coeff >> 8) as u8;
 
-    let pk = crate::Falcon512PreparedPubkey::from_bytes(bytes);
+    let pk = crate::Falcon512PreparedPubkey::<false>::from_bytes(bytes);
     assert!(
         pk.validate(),
         "validate should accept any in-range coefficient"
@@ -235,9 +235,7 @@ fn decompress_one_coeff_invariants() {
 
     let idx_in_before = idx_in;
 
-    if let Some(v) =
-        crate::codec::decompress_one_coeff(&buf, &mut acc, &mut acc_len, &mut idx_in)
-    {
+    if let Some(v) = crate::codec::decompress_one_coeff(&buf, &mut acc, &mut acc_len, &mut idx_in) {
         // Output magnitude bound (Falcon spec §3.10).
         assert!(
             v >= -2047 && v <= 2047,
@@ -325,8 +323,7 @@ fn decompress_one_coeff_matches_spec() {
     let mut acc: u64 = 0;
     let mut acc_len: u64 = 0;
     let mut idx_in: usize = 0;
-    let result =
-        crate::codec::decompress_one_coeff(&bytes, &mut acc, &mut acc_len, &mut idx_in);
+    let result = crate::codec::decompress_one_coeff(&bytes, &mut acc, &mut acc_len, &mut idx_in);
 
     // Refinement: the recovered i16 equals the spec coefficient.
     let expected: i16 = if sign { -(mag as i16) } else { mag as i16 };

@@ -27,7 +27,7 @@ fn gen_pair(
 }
 
 fn sf_verify(pk: &[u8; FALCON_512_PUBKEY_LEN], sig: &Falcon512Signature, msg: &[u8]) -> bool {
-    sig.verify(msg, Falcon512Pubkey::from_ref(pk))
+    sig.verify(msg, Falcon512Pubkey::<false>::from_ref(pk))
 }
 
 fn pq_verify(pk_bytes: &[u8], sig: &falcon512::DetachedSignature, msg: &[u8]) -> bool {
@@ -216,7 +216,7 @@ fn rejects_truncated_pubkey() {
     let msg = b"truncated pubkey test";
     let (pk_orig, _, _) = gen_pair(msg);
     let truncated = &pk_orig[..896];
-    let sf_ok = Falcon512Pubkey::try_from_slice(truncated).is_ok();
+    let sf_ok = Falcon512Pubkey::<false>::try_from_slice(truncated).is_ok();
     let pq_ok = falcon512::PublicKey::from_bytes(truncated).is_ok();
     assert_eq!(sf_ok, pq_ok);
     assert!(!sf_ok);
@@ -229,7 +229,7 @@ fn rejects_extended_pubkey() {
     let mut extended = [0u8; 898];
     extended[..897].copy_from_slice(&pk_orig);
     extended[897] = 0xAB; // garbage trailing byte
-    let sf_ok = Falcon512Pubkey::try_from_slice(&extended).is_ok();
+    let sf_ok = Falcon512Pubkey::<false>::try_from_slice(&extended).is_ok();
     let pq_ok = falcon512::PublicKey::from_bytes(&extended).is_ok();
     assert_eq!(sf_ok, pq_ok);
     assert!(!sf_ok);

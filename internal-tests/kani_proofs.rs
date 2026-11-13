@@ -8,7 +8,7 @@
 //! `internal-tests/` directory is excluded from the published tarball by
 //! [package.exclude].
 //!
-//! Run: cargo kani --harness <name>
+//! Run: RUSTFLAGS="--cfg solana_falcon512_kani" cargo kani --harness <name>
 
 use crate::ntt::{
     FIRST_LEVEL_OUTPUT_MAX, LAZY_T_INPUT_MAX, LAZY_T_OUTPUT_MAX, S2_ABS_MAX, T_OFFSET_LAZY_T,
@@ -223,7 +223,7 @@ fn validate_rejects_out_of_range() {
     bytes[2 * pos] = (coeff & 0xFF) as u8;
     bytes[2 * pos + 1] = (coeff >> 8) as u8;
 
-    let pk = crate::Falcon512PreparedPubkey::from_bytes(bytes);
+    let pk = crate::Falcon512PreparedPubkey::<false>::from_bytes(bytes);
     assert!(!pk.validate(), "validate should reject coefficient >= Q");
 }
 
@@ -244,7 +244,7 @@ fn validate_accepts_valid() {
     bytes[2 * pos] = (coeff & 0xFF) as u8;
     bytes[2 * pos + 1] = (coeff >> 8) as u8;
 
-    let pk = crate::Falcon512PreparedPubkey::from_bytes(bytes);
+    let pk = crate::Falcon512PreparedPubkey::<false>::from_bytes(bytes);
     assert!(
         pk.validate(),
         "validate should accept any in-range coefficient"

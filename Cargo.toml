@@ -1,6 +1,6 @@
 [package]
 name = "solana-falcon512"
-version = "0.1.3"
+version = "0.2.0"
 edition = "2024"
 description = "Pure-Rust Falcon-512 signature verification, optimised for Solana SBF programs."
 repository = "https://github.com/blueshift-gg/solana-falcon512"
@@ -34,10 +34,11 @@ members = [
 ]
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(solana_falcon512_kani)'] }
 
 [dependencies]
 solana-program-error = "3.0.1"
+solana-shake = "0.1.1"
 
 [dev-dependencies]
 proptest = "1"

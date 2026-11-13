@@ -62,7 +62,7 @@ fn soak_completeness() {
             let (pk, sk) = falcon512::keypair();
             let msg = format!("soak completeness msg #{i}");
             let sig = falcon512::detached_sign(msg.as_bytes(), &sk);
-            let pubkey = Falcon512Pubkey::from(pad_pk_bytes(&pk));
+            let pubkey = Falcon512Pubkey::<false>::from(pad_pk_bytes(&pk));
             let signature = Falcon512Signature::from(pad_sig_bytes(&sig));
             if signature.verify(msg.as_bytes(), &pubkey) {
                 0
@@ -102,7 +102,7 @@ fn soak_random_inputs_reject() {
             rng.fill(&mut pk);
             rng.fill(&mut sg);
             rng.fill(&mut msg);
-            let pubkey = Falcon512Pubkey::from(pk);
+            let pubkey = Falcon512Pubkey::<false>::from(pk);
             let signature = Falcon512Signature::from(sg);
             if signature.verify(&msg, &pubkey) {
                 1
@@ -147,7 +147,7 @@ fn soak_mutated_sig_rejects() {
             let pos = (rng.next() as usize) % FALCON_512_SIGNATURE_LEN;
             let bit = (rng.next() % 8) as u8;
             sig_arr[pos] ^= 1 << bit;
-            let pubkey = Falcon512Pubkey::from(*pk);
+            let pubkey = Falcon512Pubkey::<false>::from(*pk);
             let signature = Falcon512Signature::from(sig_arr);
             if signature.verify(msg, &pubkey) { 1 } else { 0 }
         })
@@ -198,7 +198,7 @@ fn soak_differential_vs_pqclean() {
             rng.fill(&mut sig_bytes);
             rng.fill(&mut msg);
 
-            let pk_obj = Falcon512Pubkey::from(pk_bytes);
+            let pk_obj = Falcon512Pubkey::<false>::from(pk_bytes);
             let sig_obj = Falcon512Signature::from(sig_bytes);
 
             let ours = sig_obj.verify(&msg, &pk_obj);

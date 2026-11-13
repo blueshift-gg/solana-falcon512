@@ -45,9 +45,11 @@ fn pubkey_decode_round_trip() {
 //   1. hash_to_point: lane-extract optimization vs spec per-byte squeeze.
 //   2. Golomb-Rice round-trip: decompress(compress(s2)) == s2.
 //   3. Rejection battery: explicit malleability constructions.
-//   4. SHAKE absorb chunking: absorb(a)+absorb(b) == absorb(a||b).
 
-use crate::keccak::Shake256;
+use sha3::{
+    Shake256,
+    digest::{ExtendableOutput, Update, XofReader},
+};
 
 // ------------------------------------------------------------------
 // Tiny xorshift64 — deterministic, no deps.
@@ -120,14 +122,14 @@ impl<'a> BitWriter<'a> {
 /// Spec-form hash_to_point: per-byte SHAKE squeeze, big-endian pair
 /// rejection-sample at `5*Q`. Stores `w` UNREDUCED (matching production).
 fn ref_hash_to_point(nonce: &[u8], message: &[u8], c: &mut [u16; N]) {
-    let mut s = Shake256::new();
-    s.absorb(nonce);
-    s.absorb(message);
-    s.finalize();
+    let mut s = Shake256::default();
+    s.update(nonce);
+    s.update(message);
+    let mut s = s.finalize_xof();
     let mut i = 0;
     while i < N {
         let mut buf = [0u8; 2];
-        s.squeeze(&mut buf);
+        s.read(&mut buf);
         let w = ((buf[0] as u32) << 8) | (buf[1] as u32);
         if w < 5 * Q {
             c[i] = w as u16;
@@ -148,7 +150,7 @@ fn hash_to_point_matches_per_byte_squeeze_random() {
         let mut msg = vec![0u8; msg_len];
         rng.fill(&mut msg);
         let mut fast = [0u16; N];
-        hash_to_point(&nonce, &msg, &mut fast);
+        hash_to_point::<false>(&nonce, &msg, &mut fast);
         let mut slow = [0u16; N];
         ref_hash_to_point(&nonce, &msg, &mut slow);
         assert_eq!(
@@ -187,7 +189,7 @@ fn hash_to_point_at_rate_boundaries() {
         let nonce = [0xABu8; 40];
         let msg = vec![0xCDu8; msg_len];
         let mut fast = [0u16; N];
-        hash_to_point(&nonce, &msg, &mut fast);
+        hash_to_point::<false>(&nonce, &msg, &mut fast);
         let mut slow = [0u16; N];
         ref_hash_to_point(&nonce, &msg, &mut slow);
         assert_eq!(fast, slow, "boundary msg_len={msg_len}");
@@ -206,7 +208,7 @@ fn hash_to_point_output_in_unreduced_range() {
         let mut msg = vec![0u8; msg_len];
         rng.fill(&mut msg);
         let mut c = [0u16; N];
-        hash_to_point(&nonce, &msg, &mut c);
+        hash_to_point::<false>(&nonce, &msg, &mut c);
         for (i, &v) in c.iter().enumerate() {
             assert!((v as u32) < 5 * Q, "slot {i}: w={v} >= 5Q={}", 5 * Q);
         }
@@ -219,9 +221,38 @@ fn hash_to_point_deterministic() {
     let msg = b"determinism check";
     let mut a = [0u16; N];
     let mut b = [0u16; N];
-    hash_to_point(&nonce, msg, &mut a);
-    hash_to_point(&nonce, msg, &mut b);
+    hash_to_point::<false>(&nonce, msg, &mut a);
+    hash_to_point::<false>(&nonce, msg, &mut b);
     assert_eq!(a, b);
+}
+
+#[test]
+fn turbo_hash_to_point_matches_rustcrypto() {
+    use sha3::{TurboShake256, TurboShake256Core};
+
+    let nonce = core::array::from_fn::<_, 40, _>(|i| i as u8);
+    for len in [0, 32, 95, 96, 97, 271, 272, 1000] {
+        let message = vec![0x5a; len];
+        let mut h = TurboShake256::from_core(TurboShake256Core::new(0x1f));
+        h.update(&nonce);
+        h.update(&message);
+        let mut reader = h.finalize_xof();
+        let mut expected = [0u16; N];
+        for coefficient in &mut expected {
+            loop {
+                let mut bytes = [0; 2];
+                reader.read(&mut bytes);
+                let candidate = u16::from_be_bytes(bytes);
+                if u32::from(candidate) < 5 * Q {
+                    *coefficient = candidate;
+                    break;
+                }
+            }
+        }
+        let mut actual = [0; N];
+        hash_to_point::<true>(&nonce, &message, &mut actual);
+        assert_eq!(actual, expected, "message length {len}");
+    }
 }
 
 // ==================================================================
@@ -669,94 +700,6 @@ fn decompress_rejects_short_buffer() {
     // idx_in == 576 == buf.len() at that point.
     let mut decoded = [0i16; N];
     assert!(decompress_signature(&buf[..576], &mut decoded));
-}
-
-// ==================================================================
-// 4. SHAKE absorb chunking — absorb(a)+absorb(b) == absorb(a||b).
-// ==================================================================
-
-#[test]
-fn shake_absorb_chunk_boundaries() {
-    let mut rng = Rng::new(0x5EED_5EED_5EED_5EED);
-    for iter in 0..500 {
-        let len_a = (rng.next_u64() % 250) as usize;
-        let len_b = (rng.next_u64() % 250) as usize;
-        let mut a = vec![0u8; len_a];
-        let mut b = vec![0u8; len_b];
-        rng.fill(&mut a);
-        rng.fill(&mut b);
-
-        let mut s1 = Shake256::new();
-        s1.absorb(&a);
-        s1.absorb(&b);
-        s1.finalize();
-        let mut o1 = [0u8; 200];
-        s1.squeeze(&mut o1);
-
-        let mut combined = a.clone();
-        combined.extend_from_slice(&b);
-        let mut s2 = Shake256::new();
-        s2.absorb(&combined);
-        s2.finalize();
-        let mut o2 = [0u8; 200];
-        s2.squeeze(&mut o2);
-
-        assert_eq!(
-            o1, o2,
-            "iter {iter}: absorb({len_a})+absorb({len_b}) != absorb({}||{})",
-            len_a, len_b
-        );
-    }
-}
-
-#[test]
-fn shake_absorb_many_small_chunks() {
-    // 100 single-byte absorb()s should equal one absorb of 100 bytes.
-    let mut rng = Rng::new(0xABCD_EF01_2345_6789);
-    let mut data = vec![0u8; 100];
-    rng.fill(&mut data);
-
-    let mut s1 = Shake256::new();
-    for &b in data.iter() {
-        s1.absorb(&[b]);
-    }
-    s1.finalize();
-    let mut o1 = [0u8; 100];
-    s1.squeeze(&mut o1);
-
-    let mut s2 = Shake256::new();
-    s2.absorb(&data);
-    s2.finalize();
-    let mut o2 = [0u8; 100];
-    s2.squeeze(&mut o2);
-
-    assert_eq!(o1, o2);
-}
-
-#[test]
-fn shake_absorb_spanning_rate() {
-    // Force absorb to span exactly one rate boundary (136 bytes).
-    let mut rng = Rng::new(0xF00D_BABE_F00D_BABE);
-    for split in [1usize, 8, 64, 135, 136, 137, 200, 271, 272, 400] {
-        let total = split + 50;
-        let mut data = vec![0u8; total];
-        rng.fill(&mut data);
-
-        let mut s1 = Shake256::new();
-        s1.absorb(&data[..split]);
-        s1.absorb(&data[split..]);
-        s1.finalize();
-        let mut o1 = [0u8; 200];
-        s1.squeeze(&mut o1);
-
-        let mut s2 = Shake256::new();
-        s2.absorb(&data);
-        s2.finalize();
-        let mut o2 = [0u8; 200];
-        s2.squeeze(&mut o2);
-
-        assert_eq!(o1, o2, "split at {split} of {total} bytes");
-    }
 }
 
 // ==================================================================

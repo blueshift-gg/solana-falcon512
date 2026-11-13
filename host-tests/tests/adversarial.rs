@@ -43,7 +43,7 @@ fn verify_paths_agree_on_valid_signatures() {
     for i in 0..200u64 {
         let msg = format!("path-symmetry-{}", i);
         let (pk_bytes, sig_bytes) = sign(msg.as_bytes());
-        let pk = Falcon512Pubkey::from(pk_bytes);
+        let pk = Falcon512Pubkey::<false>::from(pk_bytes);
         let prepared = pk.clone().prepare_pubkey();
         let sig = Falcon512Signature::from(sig_bytes);
 
@@ -62,7 +62,7 @@ fn verify_paths_agree_on_wrong_message() {
     for i in 0..200u64 {
         let msg = format!("wrongmsg-{}", i);
         let (pk_bytes, sig_bytes) = sign(msg.as_bytes());
-        let pk = Falcon512Pubkey::from(pk_bytes);
+        let pk = Falcon512Pubkey::<false>::from(pk_bytes);
         let prepared = pk.clone().prepare_pubkey();
         let sig = Falcon512Signature::from(sig_bytes);
 
@@ -81,7 +81,7 @@ fn verify_paths_agree_on_wrong_message() {
 fn verify_paths_agree_on_mutated_signatures() {
     let msg = b"adversarial path symmetry test";
     let (pk_bytes, sig_bytes) = sign(msg);
-    let pk = Falcon512Pubkey::from(pk_bytes);
+    let pk = Falcon512Pubkey::<false>::from(pk_bytes);
     let prepared = pk.clone().prepare_pubkey();
 
     let mut rng = Rng::new(0xBEEF_FEED_FACE_F00D);
@@ -120,7 +120,7 @@ fn verify_paths_agree_on_mutated_pubkeys_modulo_panic() {
         let pos = (rng.next() % FALCON_512_PUBKEY_LEN as u64) as usize;
         let bit = (rng.next() & 7) as u8;
         mutated_pk[pos] ^= 1 << bit;
-        let bad_pk = Falcon512Pubkey::from(mutated_pk);
+        let bad_pk = Falcon512Pubkey::<false>::from(mutated_pk);
 
         let r1 = sig.verify(msg, &bad_pk);
         // `prepare_pubkey()` panics on malformed input. Treat panic as reject.
@@ -148,7 +148,7 @@ fn verify_paths_agree_on_mutated_pubkeys_modulo_panic() {
     );
 }
 
-/// FINDING: `Falcon512Pubkey::prepare_pubkey()` panics on a length-valid but
+/// FINDING: `Falcon512Pubkey::<false>::prepare_pubkey()` panics on a length-valid but
 /// coefficient-malformed pubkey. The README's "runtime prepared pubkey"
 /// example uses `try_from(&pk_wire_bytes[..])?.prepare_pubkey()` — and
 /// `try_from` validates ONLY length, not coefficient ranges. So a Solana
@@ -158,7 +158,7 @@ fn verify_paths_agree_on_mutated_pubkeys_modulo_panic() {
 /// This is documented at lib.rs:167 ("# Panics") but the README example is
 /// inconsistent with that warning. Either:
 ///   1. Add a `try_prepare_pubkey() -> Result<...>` for runtime use, or
-///   2. Have `Falcon512Pubkey::try_from` validate coefficient ranges, or
+///   2. Have `Falcon512Pubkey::<false>::try_from` validate coefficient ranges, or
 ///   3. Update the README to make the panic risk explicit at the call site.
 ///
 /// This test pins the current behavior so a future change is visible.
@@ -174,7 +174,7 @@ fn finding_prepare_pubkey_panics_on_malformed_runtime_input() {
     pk_bytes[1] = 0xFF;
     pk_bytes[2] |= 0b1111_1100;
 
-    let bad_pk = Falcon512Pubkey::from(pk_bytes);
+    let bad_pk = Falcon512Pubkey::<false>::from(pk_bytes);
 
     // The non-panicking path returns false.
     let sig = Falcon512Signature::from([0u8; FALCON_512_SIGNATURE_LEN]);
@@ -199,7 +199,7 @@ fn finding_prepare_pubkey_panics_on_malformed_runtime_input() {
 fn try_prepare_pubkey_accepts_valid_pubkey() {
     let msg = b"try_prepare_pubkey valid path";
     let (pk_bytes, _) = sign(msg);
-    let pk = Falcon512Pubkey::from(pk_bytes);
+    let pk = Falcon512Pubkey::<false>::from(pk_bytes);
 
     let prepared_panicking = pk.clone().prepare_pubkey();
     let prepared_fallible = pk.try_prepare_pubkey().expect("valid pubkey");
@@ -217,7 +217,7 @@ fn try_prepare_pubkey_rejects_bad_header() {
     let msg = b"try_prepare_pubkey bad header";
     let (mut pk_bytes, _) = sign(msg);
     pk_bytes[0] ^= 0xFF; // any non-0x09 byte
-    let pk = Falcon512Pubkey::from(pk_bytes);
+    let pk = Falcon512Pubkey::<false>::from(pk_bytes);
 
     let result = pk.try_prepare_pubkey();
     assert!(
@@ -239,7 +239,7 @@ fn try_prepare_pubkey_rejects_out_of_range_coefficient() {
     pk_bytes[1] = 0xFF;
     pk_bytes[2] |= 0b1111_1100;
 
-    let pk = Falcon512Pubkey::from(pk_bytes);
+    let pk = Falcon512Pubkey::<false>::from(pk_bytes);
 
     let result = pk.try_prepare_pubkey();
     assert!(
@@ -254,7 +254,7 @@ fn try_prepare_pubkey_rejects_out_of_range_coefficient() {
 #[test]
 fn verify_handles_empty_message() {
     let (pk_bytes, sig_bytes) = sign(b"");
-    let pk = Falcon512Pubkey::from(pk_bytes);
+    let pk = Falcon512Pubkey::<false>::from(pk_bytes);
     let prepared = pk.clone().prepare_pubkey();
     let sig = Falcon512Signature::from(sig_bytes);
     assert!(sig.verify(b"", &pk));
@@ -269,7 +269,7 @@ fn verify_handles_empty_message() {
 fn verify_handles_long_message() {
     let msg: Vec<u8> = (0..10_000u32).map(|i| (i & 0xFF) as u8).collect();
     let (pk_bytes, sig_bytes) = sign(&msg);
-    let pk = Falcon512Pubkey::from(pk_bytes);
+    let pk = Falcon512Pubkey::<false>::from(pk_bytes);
     let prepared = pk.clone().prepare_pubkey();
     let sig = Falcon512Signature::from(sig_bytes);
     assert!(sig.verify(&msg, &pk));
@@ -282,7 +282,7 @@ fn verify_handles_long_message() {
 fn rejects_every_non_compressed_header() {
     let msg = b"header rejection";
     let (pk_bytes, sig_bytes) = sign(msg);
-    let pk = Falcon512Pubkey::from(pk_bytes);
+    let pk = Falcon512Pubkey::<false>::from(pk_bytes);
     let prepared = pk.clone().prepare_pubkey();
 
     for hdr in 0u8..=255 {
@@ -315,7 +315,7 @@ fn rejects_every_non_pubkey_header() {
         } // valid header
         let mut tampered_pk = pk_bytes;
         tampered_pk[0] = hdr;
-        let bad_pk = Falcon512Pubkey::from(tampered_pk);
+        let bad_pk = Falcon512Pubkey::<false>::from(tampered_pk);
         assert!(
             !sig.verify(msg, &bad_pk),
             "accepted pubkey header byte {hdr:#x}"

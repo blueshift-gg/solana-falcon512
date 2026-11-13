@@ -62,7 +62,7 @@ fn fuzz_random_inputs_no_panic() {
             pk_bytes[0] = 0x09;
             sig_bytes[0] = 0x39;
         }
-        let pk = Falcon512Pubkey::from(pk_bytes);
+        let pk = Falcon512Pubkey::<false>::from(pk_bytes);
         let sig = Falcon512Signature::from(sig_bytes);
         let _ = sig.verify(&msg, &pk);
     }
@@ -72,7 +72,7 @@ fn fuzz_random_inputs_no_panic() {
 fn fuzz_mutated_signature_rejects() {
     let msg = b"fuzz signature mutation";
     let (pk_bytes, sig_bytes) = sign(msg);
-    let pubkey = Falcon512Pubkey::from(pk_bytes);
+    let pubkey = Falcon512Pubkey::<false>::from(pk_bytes);
     assert!(Falcon512Signature::from(sig_bytes).verify(msg, &pubkey));
 
     let mut rng = Rng::new(0xCAFE_BABE_CAFE_BABE);
@@ -106,7 +106,7 @@ fn fuzz_mutated_pubkey_rejects() {
         if mutated_pk == pk_bytes {
             continue;
         }
-        let pubkey = Falcon512Pubkey::from(mutated_pk);
+        let pubkey = Falcon512Pubkey::<false>::from(mutated_pk);
         let signature = Falcon512Signature::from(sig_bytes);
         assert!(
             !signature.verify(msg, &pubkey),
@@ -119,7 +119,7 @@ fn fuzz_mutated_pubkey_rejects() {
 fn fuzz_mutated_message_rejects() {
     let original: &[u8] = b"original message long enough to mutate plenty of bits";
     let (pk_bytes, sig_bytes) = sign(original);
-    let pubkey = Falcon512Pubkey::from(pk_bytes);
+    let pubkey = Falcon512Pubkey::<false>::from(pk_bytes);
     let signature = Falcon512Signature::from(sig_bytes);
 
     let mut rng = Rng::new(0xBADF_00DE_BADF_00DE);
@@ -139,7 +139,7 @@ fn fuzz_mutated_message_rejects() {
 fn fuzz_random_message_with_valid_keypair() {
     // Valid pubkey/sig pair, but feed completely random messages — must reject.
     let (pk_bytes, sig_bytes) = sign(b"the real message");
-    let pubkey = Falcon512Pubkey::from(pk_bytes);
+    let pubkey = Falcon512Pubkey::<false>::from(pk_bytes);
     let signature = Falcon512Signature::from(sig_bytes);
 
     let mut rng = Rng::new(0xFACE_FEED_FACE_FEED);

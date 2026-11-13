@@ -13,7 +13,9 @@
 //! cap) live separately in `host-tests/tests/pqclean_wire_format.rs`,
 //! since they require the `pqcrypto-falcon` dev-dep.
 
-use crate::ntt::{BIG_Q_FUSED_NORM, LAZY_OFFSET_GS, T_OFFSET_FUSED, T_OFFSET_LAZY_T};
+use crate::ntt::{
+    BIG_Q_FUSED_NORM, LAZY_OFFSET_GS, LAZY_T_INPUT_MAX, T_OFFSET_FUSED, T_OFFSET_LAZY_T,
+};
 use crate::{
     FALCON_512_PUBKEY_LEN, FALCON_512_SIGNATURE_LEN, L2_BOUND, N, NONCE_LEN, PUBKEY_HEADER, Q,
     SIG_HEADER,
@@ -110,8 +112,14 @@ fn hash_to_point_rejection_bound_is_5q() {
 
 /// Lazy-`t` CT butterfly offset. Matches `Falcon512.Spec.T_OFFSET_LAZY_T`. -/
 #[test]
-fn t_offset_lazy_t_eq_8_q_squared() {
-    assert_eq!(T_OFFSET_LAZY_T, 8 * (Q as u64) * (Q as u64));
+fn t_offset_lazy_t_eq_9_q_squared() {
+    assert_eq!(T_OFFSET_LAZY_T, 9 * (Q as u64) * (Q as u64));
+}
+
+/// True max of lazy-`t` butterfly inputs. Matches `Falcon512.Spec.LAZY_T_INPUT_MAX`. -/
+#[test]
+fn lazy_t_input_max_eq_8_q_plus_2047() {
+    assert_eq!(LAZY_T_INPUT_MAX, 8 * (Q as u64) + 2047);
 }
 
 /// Lazy GS butterfly offset. Matches `Falcon512.Spec.LAZY_OFFSET_GS`. -/

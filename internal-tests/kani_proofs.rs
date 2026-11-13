@@ -11,8 +11,8 @@
 //! Run: cargo kani --harness <name>
 
 use crate::ntt::{
-    T_OFFSET_LAZY_T, ct_butterfly_lazy_t_step, ct_butterfly_step, fused_norm_step,
-    fused_step_kernel, gs_butterfly_lazy_step,
+    LAZY_T_INPUT_MAX, LAZY_T_OUTPUT_MAX, T_OFFSET_LAZY_T, ct_butterfly_lazy_t_step,
+    ct_butterfly_step, fused_norm_step, fused_step_kernel, gs_butterfly_lazy_step,
 };
 use crate::{N, Q};
 
@@ -47,7 +47,7 @@ fn ct_butterfly_no_overflow() {
     assert!(hi <= u32::MAX as u64);
 }
 
-/// Lazy-`t` CT butterfly: a, b ≤ 8·Q, zeta < Q ⇒ both outputs fit u32.
+/// Lazy-`t` CT butterfly: a, b ≤ LAZY_T_INPUT_MAX (= 8·Q + 2047), zeta < Q ⇒ both outputs fit u32.
 /// Spec equivalence with the strict variant follows from the compile-time
 /// `T_OFFSET_LAZY_T % Q == 0` const-assert in `ntt.rs`.
 #[kani::proof]
@@ -56,10 +56,12 @@ fn ct_butterfly_lazy_t_no_overflow() {
     let a: u64 = kani::any();
     let b: u64 = kani::any();
     let zeta: u64 = kani::any();
-    kani::assume(a <= 8 * Q as u64);
-    kani::assume(b <= 8 * Q as u64);
+    kani::assume(a <= LAZY_T_INPUT_MAX);
+    kani::assume(b <= LAZY_T_INPUT_MAX);
     kani::assume(zeta < Q as u64);
 
+    // No underflow of `a + T_OFFSET_LAZY_T - t` (the old 8·Q² failed here).
+    assert!(b * zeta <= a + T_OFFSET_LAZY_T);
     let (lo, hi) = ct_butterfly_lazy_t_step(a, b, zeta);
     assert!(lo <= u32::MAX as u64);
     assert!(hi <= u32::MAX as u64);
@@ -92,7 +94,7 @@ fn inv_ntt_lazy_offset_sufficient() {
 // =========================================================================
 
 /// Per-pair fused-step kernel: with `prev_*` bounded by the lazy-t output
-/// (8·Q + T_OFFSET_LAZY_T) and `h_*`, `z`, `z_inv < Q`, both outputs are
+/// (LAZY_T_OUTPUT_MAX = LAZY_T_INPUT_MAX + T_OFFSET_LAZY_T) and `h_*`, `z`, `z_inv < Q`, both outputs are
 /// in [0, 2·Q) and [0, Q) respectively (fit u32). `T_OFFSET_FUSED` being
 /// a multiple of Q and ≥ the worst-case `t` is checked at compile time
 /// in `ntt.rs`.
@@ -106,7 +108,7 @@ fn fused_step_t_offset_sufficient() {
     let z: u64 = kani::any();
     let z_inv: u64 = kani::any();
 
-    let lazy_t_bound = 8 * Q as u64 + T_OFFSET_LAZY_T;
+    let lazy_t_bound = LAZY_T_OUTPUT_MAX;
     kani::assume(prev_low as u64 <= lazy_t_bound);
     kani::assume(prev_high as u64 <= lazy_t_bound);
     kani::assume((h_lo as u64) < Q as u64);
@@ -235,9 +237,7 @@ fn decompress_one_coeff_invariants() {
 
     let idx_in_before = idx_in;
 
-    if let Some(v) =
-        crate::codec::decompress_one_coeff(&buf, &mut acc, &mut acc_len, &mut idx_in)
-    {
+    if let Some(v) = crate::codec::decompress_one_coeff(&buf, &mut acc, &mut acc_len, &mut idx_in) {
         // Output magnitude bound (Falcon spec §3.10).
         assert!(
             v >= -2047 && v <= 2047,
@@ -325,8 +325,7 @@ fn decompress_one_coeff_matches_spec() {
     let mut acc: u64 = 0;
     let mut acc_len: u64 = 0;
     let mut idx_in: usize = 0;
-    let result =
-        crate::codec::decompress_one_coeff(&bytes, &mut acc, &mut acc_len, &mut idx_in);
+    let result = crate::codec::decompress_one_coeff(&bytes, &mut acc, &mut acc_len, &mut idx_in);
 
     // Refinement: the recovered i16 equals the spec coefficient.
     let expected: i16 = if sign { -(mag as i16) } else { mag as i16 };

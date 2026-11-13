@@ -73,11 +73,36 @@ const INV_ZETAS: [u32; N] = {
 // values production code uses, instead of redefining them.
 // ============================================================================
 
-/// Offset for the lazy-`t` CT butterfly. After 7 lazy fwd levels inputs are
-/// bounded by 8·Q, so `t = b·zeta < 8·Q²`.
-pub(crate) const T_OFFSET_LAZY_T: u64 = 8 * (Q as u64) * (Q as u64);
+/// Largest signed-`s2` magnitude the decoder admits.
+pub(crate) const S2_ABS_MAX: u64 = 2047;
+
+/// True maximum of the inputs `a`, `b` to the lazy-`t` CT butterfly (the
+/// last forward main level, len=2).
+///
+/// `ntt_main_levels_from_signed` maps `s2 ∈ [-2047, 2047]` to
+/// `Q + s2 ∈ [Q-2047, Q+2047]` (no `% Q`), so the first level's inputs are
+/// ≤ `Q + 2047`. Its strict outputs are `r_lo + t` and `r_lo + Q - t` with
+/// `t < Q`, i.e. ≤ `2·Q + 2047`. Each of the 6 further strict levels
+/// (len = 128, 64, 32, 16, 8, 4) adds at most `Q` (`a + Q - t`, `t ≥ 0`),
+/// so the inputs reaching the lazy-`t` level are ≤ `8·Q + 2047`.
+pub(crate) const LAZY_T_INPUT_MAX: u64 = 8 * (Q as u64) + S2_ABS_MAX;
+
+/// Offset for the lazy-`t` CT butterfly. `t = b·zeta` with
+/// `b ≤ LAZY_T_INPUT_MAX` and `zeta ≤ Q-1` can reach
+/// `(8·Q + 2047)·(Q-1) ≈ 1.2332·10⁹`, which EXCEEDS `8·Q² ≈ 1.2082·10⁹`;
+/// `9·Q²` (a multiple of Q, so `% Q` is unchanged) covers it.
+pub(crate) const T_OFFSET_LAZY_T: u64 = 9 * (Q as u64) * (Q as u64);
 const _: () = assert!(T_OFFSET_LAZY_T.is_multiple_of(Q as u64)); // spec-preserving
-const _: () = assert!(T_OFFSET_LAZY_T >= 8 * (Q as u64) * (Q as u64 - 1)); // ≥ max t
+// ≥ true max t, so `a + T_OFFSET_LAZY_T - t` never underflows.
+const _: () = assert!(T_OFFSET_LAZY_T >= LAZY_T_INPUT_MAX * (Q as u64 - 1));
+// The old `8·Q²` constant was NOT sufficient (kept as documentation).
+const _: () = assert!(8 * (Q as u64) * (Q as u64) < LAZY_T_INPUT_MAX * (Q as u64 - 1));
+// Both outputs `a + t` and `a + offset - t` fit u32.
+const _: () = assert!(LAZY_T_INPUT_MAX + T_OFFSET_LAZY_T <= u32::MAX as u64);
+
+/// Upper bound on the lazy-`t` outputs (`prev_low`, `prev_high` of the
+/// fused step): `a + offset` (the larger of `a + t` and `a + offset - t`).
+pub(crate) const LAZY_T_OUTPUT_MAX: u64 = LAZY_T_INPUT_MAX + T_OFFSET_LAZY_T;
 
 /// Offset inside the lazy GS butterfly. Worst-case `v` after 7 inv-NTT lazy
 /// levels is ~256·Q.
@@ -86,11 +111,16 @@ const _: () = assert!(LAZY_OFFSET_GS.is_multiple_of(Q as u64)); // spec-preservi
 const _: () = assert!(LAZY_OFFSET_GS >= 256 * (Q as u64)); // ≥ max v
 
 /// Offset for the fused last-fwd / pointwise / first-inv step. Worst-case
-/// `t = prev_high · z ≤ 8·Q³` (preceding fwd last main level is `ct_butterfly_lazy_t`).
+/// `t = prev_high · z ≤ LAZY_T_OUTPUT_MAX · (Q-1)` (preceding fwd last main
+/// level is `ct_butterfly_lazy_t`).
 pub(crate) const T_OFFSET_FUSED: u64 = (Q as u64) * (1u64 << 31);
 const _: () = assert!(T_OFFSET_FUSED.is_multiple_of(Q as u64)); // spec-preserving
-// ≥ worst-case t = (8·Q + T_OFFSET_LAZY_T) · (Q − 1).
-const _: () = assert!(T_OFFSET_FUSED >= (8 * (Q as u64) + T_OFFSET_LAZY_T) * (Q as u64 - 1));
+// ≥ worst-case t = LAZY_T_OUTPUT_MAX · (Q − 1).
+const _: () = assert!(T_OFFSET_FUSED >= LAZY_T_OUTPUT_MAX * (Q as u64 - 1));
+// u64 headroom for the pointwise products: (prev_low + T_OFFSET_FUSED) · h < 2^64.
+const _: () = assert!(((LAZY_T_OUTPUT_MAX + T_OFFSET_FUSED) as u128) * (Q as u128) < (1u128 << 64));
+// The fused step reads `prev_*` as u32.
+const _: () = assert!(LAZY_T_OUTPUT_MAX <= u32::MAX as u64);
 
 /// Offset for `last_level_fused_norm` — large enough to absorb unreduced
 /// `new_hi ≤ 512·Q²`, and big enough that LLVM-SBF can't infer the subtract
@@ -234,10 +264,11 @@ macro_rules! ct_butterfly {
 // CT butterfly that *also* skips the `t = ... % q` reduction. Only safe at
 // the very last forward NTT level (len=2) — the next consumer is the fused
 // step which does `α·a + β·b mod q` and absorbs any un-reduction. After 7
-// prior lazy levels (sgn_ct_bf → ntt_levels_after_first up to len=4), inputs
-// are bounded by 8·Q, so `t = b·zeta` is bounded by 8·Q² ≈ 1.21·10⁹ — fits
-// u32. The high-half subtract uses `8·Q²` as the offset (a multiple of Q so
-// `% Q` is unchanged) to keep `u + offset - t` non-negative.
+// prior strict levels (sgn_ct_bf → ntt_levels_after_first up to len=4), inputs
+// are bounded by `LAZY_T_INPUT_MAX = 8·Q + 2047` (the +2047 comes from the
+// signed s2 → Q+s2 mapping), so `t = b·zeta ≤ (8·Q + 2047)·(Q-1) ≈ 1.233·10⁹`
+// — fits u32. The high-half subtract uses `9·Q²` as the offset (a multiple
+// of Q so `% Q` is unchanged) to keep `u + offset - t` non-negative.
 macro_rules! ct_butterfly_lazy_t {
     ($r:ident, $j:expr, $len:expr, $zeta:expr) => {{
         let (lo, hi) = ct_butterfly_lazy_t_step($r[$j] as u64, $r[$j + $len] as u64, $zeta);

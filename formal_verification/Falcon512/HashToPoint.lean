@@ -15,23 +15,24 @@
   give a non-uniform `c`, weakening the security argument. Accepting
   too small a threshold (e.g. w < 4*Q) would still be uniform but
   reject more candidates — wasted SHAKE work, not a soundness issue.
+
+  Core Lean only (no Mathlib): the accept set is `List.range (5*Q)`, fibres
+  are `List.filter`s and cardinalities are `List.length`.
 -/
 
 import Falcon512.Defs
-import Mathlib.Data.Finset.Image
-import Mathlib.Data.Finset.Card
-import Mathlib.Tactic.Linarith
 
 namespace Falcon512.Spec.HashToPoint
 
 open Falcon512.Spec
 
-/-- The accept set: 16-bit candidates `w` with `w < 5*Q`. -/
-def acceptSet : Finset Nat := Finset.range (5 * Q)
+/-- The accept set: 16-bit candidates `w` with `w < 5*Q`
+    (as the list `[0, 1, ..., 5*Q-1]`; formerly `Finset.range (5*Q)`). -/
+def acceptSet : List Nat := List.range (5 * Q)
 
-theorem acceptSet_card : acceptSet.card = 5 * Q := by
+theorem acceptSet_card : acceptSet.length = 5 * Q := by
   unfold acceptSet
-  exact Finset.card_range _
+  exact List.length_range _
 
 /-- The accept set fits in the 16-bit candidate range. -/
 theorem acceptSet_fits_u16 : 5 * Q ≤ 2^16 := by
@@ -42,53 +43,52 @@ theorem acceptSet_fits_u16 : 5 * Q ≤ 2^16 := by
 theorem six_q_exceeds_u16 : 6 * Q > 2^16 := by
   unfold Q; omega
 
-/-- The set of accepted candidates `w ∈ [0, 5Q)` whose residue mod Q
-    equals `r`. -/
-def residueFiber (r : Nat) : Finset Nat :=
+/-- The accepted candidates `w ∈ [0, 5Q)` whose residue mod Q
+    equals `r` (formerly a `Finset.filter`; now a `List.filter`). -/
+def residueFiber (r : Nat) : List Nat :=
   acceptSet.filter (fun w => w % Q = r)
 
 /-- For every residue `r < Q`, the fiber inside the accept set is
     exactly `{r, r+Q, r+2Q, r+3Q, r+4Q}` — i.e. the five values
-    obtained by adding multiples of Q to `r`, all bounded by 5Q. -/
+    obtained by adding multiples of Q to `r`, all bounded by 5Q.
+    (Stated as membership equivalence with the explicit five-element
+    list; this is the `Finset` equality of the earlier statement.) -/
 theorem residueFiber_eq_image (r : Nat) (hr : r < Q) :
-    residueFiber r = (Finset.range 5).image (fun k => r + k * Q) := by
-  ext w
-  simp only [residueFiber, acceptSet, Finset.mem_filter, Finset.mem_range,
-             Finset.mem_image]
-  refine ⟨?_, ?_⟩
+    ∀ w, w ∈ residueFiber r ↔
+      w ∈ (List.range 5).map (fun k => r + k * Q) := by
+  intro w
+  simp only [residueFiber, acceptSet, List.mem_filter, List.mem_range,
+             List.mem_map, decide_eq_true_eq]
+  unfold Q at *
+  constructor
   · rintro ⟨hwlt, hwmod⟩
-    -- w < 5Q ∧ w % Q = r ⇒ ∃ k < 5, w = r + k*Q.
-    refine ⟨w / Q, ?_, ?_⟩
-    · have hQ_pos : Q > 0 := q_pos
-      exact (Nat.div_lt_iff_lt_mul hQ_pos).mpr hwlt
-    · -- Use the div+mod identity in the form we need.
-      have hdm : Q * (w / Q) + w % Q = w := Nat.div_add_mod w Q
-      -- Rewrite Q * (w/Q) as (w/Q) * Q to match goal shape.
-      have hcomm : Q * (w / Q) = (w / Q) * Q := Nat.mul_comm _ _
-      omega
+    exact ⟨w / 12289, by omega, by omega⟩
   · rintro ⟨k, hk5, rfl⟩
-    refine ⟨?_, ?_⟩
-    · -- r + k*Q < 5*Q from r < Q and k ≤ 4.
-      have hk_le : k ≤ 4 := by omega
-      have hkQ : k * Q ≤ 4 * Q := Nat.mul_le_mul_right Q hk_le
-      linarith
-    · -- (r + k*Q) % Q = r since r < Q. Step 1: kill the k*Q via add_mul_mod_self_right.
-      have h1 : (r + k * Q) % Q = r % Q := Nat.add_mul_mod_self_right r k Q
-      rw [h1]
-      exact Nat.mod_eq_of_lt hr
+    omega
+
+/-- Counting lemma: among `[0, n)` exactly `n / Q + [r < n % Q]` numbers
+    are `≡ r (mod Q)`. -/
+theorem filter_range_length (r : Nat) (hr : r < Q) (n : Nat) :
+    ((List.range n).filter (fun w => w % Q = r)).length
+      = n / Q + (if r < n % Q then 1 else 0) := by
+  induction n with
+  | zero => simp
+  | succ n ih =>
+    rw [List.range_succ, List.filter_append, List.length_append, ih]
+    unfold Q at *
+    by_cases h : n % 12289 = r
+    · simp [h]
+      (repeat' split) <;> omega
+    · simp [h]
+      (repeat' split) <;> omega
 
 /-- Every residue's fiber has cardinality exactly 5. -/
 theorem residueFiber_card (r : Nat) (hr : r < Q) :
-    (residueFiber r).card = 5 := by
-  rw [residueFiber_eq_image r hr]
-  rw [Finset.card_image_of_injective _ ?_, Finset.card_range]
-  -- Injectivity of `k ↦ r + k * Q` on ℕ.
-  intro a b hab
-  simp only at hab
-  -- hab : r + a * Q = r + b * Q
-  have h1 : a * Q = b * Q := by linarith
-  have hQ_pos : Q > 0 := q_pos
-  exact Nat.eq_of_mul_eq_mul_right hQ_pos h1
+    (residueFiber r).length = 5 := by
+  unfold residueFiber acceptSet
+  rw [filter_range_length r hr]
+  unfold Q at *
+  split <;> omega
 
 /-- **Uniformity theorem.** Given a uniform random `w ∈ [0, 5Q)`,
     the residue `w mod Q` is uniformly distributed over `[0, Q)`.
@@ -98,7 +98,7 @@ theorem residueFiber_card (r : Nat) (hr : r < Q) :
     `Pr[w mod Q = r | w < 5Q] = 1/Q` follows by dividing both sides
     of `residueFiber_card` by `acceptSet_card = 5Q`. -/
 theorem hash_to_point_uniform (r : Nat) (hr : r < Q) :
-    (residueFiber r).card * Q = acceptSet.card := by
+    (residueFiber r).length * Q = acceptSet.length := by
   rw [residueFiber_card r hr, acceptSet_card]
 
 end Falcon512.Spec.HashToPoint

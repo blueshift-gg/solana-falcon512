@@ -1,4 +1,4 @@
--- Falcon-512 Formal Verification (Lean 4 / Mathlib).
+-- Falcon-512 Formal Verification (Lean 4, core only; no Mathlib).
 --
 -- Lean's scope here is the math: we verify the algebraic facts each
 -- Rust optimization rests on, and the abstract byte-level codec
@@ -15,7 +15,7 @@
 -- not to re-prove textbook theorems.
 --
 -- What Lean covers:
---   1. Per-element ZMod-Q identities for each of the six Rust optimisations
+--   1. Per-element mod-Q identities (Int / Nat with `%`) for each of the six Rust optimisations
 --      (lazy CT, lazy-`t`, fused step, fused norm, unreduced hash-to-point,
 --      lazy GS offset).
 --   2. Lazy-NTT bound arithmetic (every intermediate value fits its u32/u64

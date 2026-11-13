@@ -34,8 +34,12 @@ def MAX_S2_MAG : Nat := 2047
 -- compile time; we reproduce the values verbatim here.
 -- ----------------------------------------------------------------------------
 
-/-- Lazy-`t` CT butterfly offset; `src/ntt.rs::T_OFFSET_LAZY_T = 8·Q²`. -/
-def T_OFFSET_LAZY_T : Nat := 8 * Q * Q
+/-- Lazy-`t` CT butterfly offset; `src/ntt.rs::T_OFFSET_LAZY_T = 9·Q²`. -/
+def T_OFFSET_LAZY_T : Nat := 9 * Q * Q
+
+/-- True max of the lazy-`t` butterfly inputs; `src/ntt.rs::LAZY_T_INPUT_MAX
+    = 8·Q + 2047` (signed s2 maps to `Q + s2`, then 7 strict levels). -/
+def LAZY_T_INPUT_MAX : Nat := 8 * Q + 2047
 
 /-- Lazy GS butterfly offset; `src/ntt.rs::LAZY_OFFSET_GS = 256·Q`. -/
 def LAZY_OFFSET_GS : Nat := 256 * Q

@@ -2274,7 +2274,7 @@ dependencies = [
 
 [[package]]
 name = "solana-falcon512"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "sha3",
@@ -2727,7 +2727,8 @@ dependencies = [
 [[package]]
 name = "solana-shake"
 version = "0.1.0"
-source = "git+https://github.com/blueshift-gg/solana-shake?rev=684f8152dd8b75c8793ba495511b9b938b1b5aeb#684f8152dd8b75c8793ba495511b9b938b1b5aeb"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25c60f3b87e627522e650fea735a94cd007446f04a9284b08618f51efc8c3545"
 
 [[package]]
 name = "solana-signature"

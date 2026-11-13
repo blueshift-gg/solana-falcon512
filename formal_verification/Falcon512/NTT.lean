@@ -5,12 +5,11 @@
   that the NTT round-trip identity holds at the butterfly level,
   and key algebraic constants (N_INV, PSI).
 
-  Uses Mathlib's ZMod for modular arithmetic ring reasoning.
+  Core Lean 4 only (no Mathlib): modular ring reasoning is done over `Int`
+  with `%`, i.e. in Z/QZ via congruences.
 -/
 
 import Falcon512.Defs
-import Mathlib.Data.ZMod.Basic
-import Mathlib.RingTheory.RootsOfUnity.Basic
 
 namespace Falcon512.Spec.NTT
 
@@ -22,7 +21,7 @@ open Falcon512.Spec
 
 def N_INV : Nat := 12265
 
-theorem n_inv_correct : (N_INV * N) % Q = 1 := by native_decide
+theorem n_inv_correct : (N_INV * N) % Q = 1 := by decide
 
 -- ============================================================================
 -- PSI (primitive 2N-th root of unity)
@@ -30,9 +29,11 @@ theorem n_inv_correct : (N_INV * N) % Q = 1 := by native_decide
 
 def PSI : Nat := 49
 
-theorem psi_is_root : powQ PSI N = Q - 1 := by native_decide
+theorem psi_is_root : powQ PSI N = Q - 1 := by
+  simp [powQ, mulQ, PSI, N, Q]
 
-theorem psi_order_divides : powQ PSI (2 * N) = 1 := by native_decide
+theorem psi_order_divides : powQ PSI (2 * N) = 1 := by
+  simp [powQ, mulQ, PSI, N, Q]
 
 -- ============================================================================
 -- CT/GS butterfly inverse relationship
@@ -40,17 +41,29 @@ theorem psi_order_divides : powQ PSI (2 * N) = 1 := by native_decide
 
 /-- A CT butterfly followed by a GS butterfly with the inverse twiddle
     factor recovers the original pair scaled by 2.
-    This is proven in ZMod Q where we have ring structure. -/
-theorem ct_gs_inverse_zmod (a b z : ZMod Q)
-    (hz : z * z⁻¹ = 1) :
+    Stated over `Int` with `% Q` (congruence mod Q; equivalent to the
+    former `ZMod Q` statement, where `z⁻¹` is any `zi` with
+    `z * zi ≡ 1 (mod Q)`). -/
+theorem ct_gs_inverse_zmod (a b z zi : Int)
+    (hz : (z * zi) % (Q : Int) = 1) :
     let lo := a + b * z
     let hi := a - b * z
-    lo + hi = 2 * a ∧ (lo - hi) * z⁻¹ = 2 * b := by
+    (lo + hi) % (Q : Int) = (2 * a) % (Q : Int) ∧
+    ((lo - hi) * zi) % (Q : Int) = (2 * b) % (Q : Int) := by
+  intro lo hi
   constructor
-  · ring
-  · -- (lo - hi) * z⁻¹ = 2 * b * z * z⁻¹ = 2 * b
-    have : (a + b * z - (a - b * z)) * z⁻¹ = 2 * b * (z * z⁻¹) := by ring
-    rw [this, hz, mul_one]
+  · have : lo + hi = 2 * a := by
+      show a + b * z + (a - b * z) = 2 * a
+      omega
+    rw [this]
+  · have h1 : (lo - hi) * zi = 2 * b * (z * zi) := by
+      have e : lo - hi = 2 * (b * z) := by
+        show a + b * z - (a - b * z) = 2 * (b * z)
+        omega
+      rw [e, Int.mul_assoc, Int.mul_assoc]
+      rw [Int.mul_assoc]
+    rw [h1, Int.mul_emod, hz]
+    simp
 
 -- ============================================================================
 -- Full NTT round-trip scaling factor

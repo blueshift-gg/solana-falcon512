@@ -1,6 +1,6 @@
 [package]
 name = "solana-falcon512"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 description = "Pure-Rust Falcon-512 signature verification, optimised for Solana SBF programs."
 repository = "https://github.com/blueshift-gg/solana-falcon512"
@@ -38,8 +38,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [dependencies]
 solana-program-error = "3.0.1"
-# SHAKE/TurboSHAKE API: https://github.com/blueshift-gg/solana-shake/pull/1
-solana-shake = { version = "0.1.0", git = "https://github.com/blueshift-gg/solana-shake", rev = "684f8152dd8b75c8793ba495511b9b938b1b5aeb" }
+solana-shake = "0.1.0"
 
 [dev-dependencies]
 proptest = "1"

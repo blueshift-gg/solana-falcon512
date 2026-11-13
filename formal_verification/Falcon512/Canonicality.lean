@@ -26,10 +26,6 @@
   file is the machine-checked formalization of the model.
 -/
 
-import Mathlib.Data.List.Basic
-import Mathlib.Data.Nat.Defs
-import Mathlib.Tactic.Linarith
-import Mathlib.Tactic.Ring
 import Falcon512.Defs
 
 namespace Falcon512.Spec.Canonicality
@@ -66,7 +62,7 @@ with length `9 + mag/128`. The two main results in this section are
 `encodeCoeff_prefix_free` (no encoding is a strict prefix of another). -/
 
 -- The internal `lsb7Bits` / `lsb7Decode` round-trip is verified by
--- `native_decide` over `Fin 128`, then lifted to a bound-checked input.
+-- `decide` over `Fin 128`, then lifted to a bound-checked input.
 
 /-- Bit-list of the 7 LSBs of `mag`, MSB first. -/
 private def lsb7Bits (mag : Nat) : List Bool :=
@@ -91,7 +87,7 @@ private def lsb7Decode : List Bool → Nat
 
 private theorem lsb7Bits_roundtrip (mag : Nat) (h : mag < 128) :
     lsb7Decode (lsb7Bits mag) = mag := by
-  have key : ∀ m : Fin 128, lsb7Decode (lsb7Bits m.val) = m.val := by native_decide
+  have key : ∀ m : Fin 128, lsb7Decode (lsb7Bits m.val) = m.val := by decide
   exact key ⟨mag, h⟩
 
 private theorem lsb7Bits_injective {a b : Nat} (ha : a < 128) (hb : b < 128)
@@ -273,7 +269,7 @@ theorem encodeAll_length (cs : List Coeff) :
   | nil => simp [encodeAll]
   | cons _ _ ih =>
       simp [encodeAll, encodeCoeff_length, ih, List.length_cons]
-      ring
+      omega
 
 -- N=512 specialization ------------------------------------------------------
 
@@ -333,9 +329,8 @@ private theorem encodeAll_getLast?_eq_some_true (cs : List Coeff) (h : cs ≠ []
     · subst hcs
       rw [encodeAll_cons, encodeAll_nil, List.append_nil]
       exact encodeCoeff_getLast?_eq_some_true c
-    · rw [encodeAll_cons,
-          List.getLast?_append_of_ne_nil _ (encodeAll_ne_nil_of_ne_nil cs hcs)]
-      exact ih hcs
+    · rw [encodeAll_cons, List.getLast?_append, ih hcs]
+      rfl
 
 -- §4.2 — Zero-pad cancellation. -----------------------------------------
 
@@ -359,7 +354,7 @@ theorem append_replicate_false_inj
       b1.length ≤ b2.length →
       b1 ++ List.replicate n1 false = b2 ++ List.replicate n2 false →
       b1 = b2 ∧ n1 = n2 by
-    rcases le_total bs1.length bs2.length with hle | hle
+    rcases Nat.le_total bs1.length bs2.length with hle | hle
     · exact hwlog bs1 bs2 z1 z2 h1 h2 hle h
     · obtain ⟨he, hn⟩ := hwlog bs2 bs1 z2 z1 h2 h1 hle h.symm
       exact ⟨he.symm, hn.symm⟩
@@ -369,8 +364,9 @@ theorem append_replicate_false_inj
     have := congrArg (List.take b1.length) heq
     rwa [List.take_left, List.take_append_of_le_length hlen] at this
   have hsplit : b2 = b1 ++ b2.drop b1.length := by
-    conv_lhs => rw [← List.take_append_drop b1.length b2]
-    rw [← hprefix]
+    have htad := List.take_append_drop b1.length b2
+    rw [← hprefix] at htad
+    exact htad.symm
   -- The trailing segment of `b2` is all-`false` (a prefix of `replicate n1 false`).
   have hdrop_all_false : ∀ x ∈ b2.drop b1.length, x = false := by
     have heq' : List.replicate n1 false =
@@ -385,22 +381,21 @@ theorem append_replicate_false_inj
     exact List.eq_of_mem_replicate hmem
   -- That segment must be empty (else `b2`'s last element would be `false`).
   have hdrop_nil : b2.drop b1.length = [] := by
-    by_contra hne
-    have hlast : b2.getLast? = (b2.drop b1.length).getLast? := by
-      conv_lhs => rw [hsplit]
-      rw [List.getLast?_append_of_ne_nil _ hne]
-    rw [hlast] at hb2
+    refine Classical.byContradiction fun hne => ?_
     obtain ⟨head, tail, hd⟩ : ∃ head tail, b2.drop b1.length = head :: tail := by
       rcases hl : b2.drop b1.length with _ | ⟨head, tail⟩
       · exact absurd hl hne
       · exact ⟨head, tail, rfl⟩
-    rw [hd] at hb2 hdrop_all_false
+    have hl : b2.getLast? = (b1 ++ b2.drop b1.length).getLast? := by
+      rw [← hsplit]
+    rw [hl, List.getLast?_append, hd] at hb2
+    rw [hd] at hdrop_all_false
     have hlast_in : (head :: tail).getLast (List.cons_ne_nil _ _) ∈ head :: tail :=
       List.getLast_mem _
     have hf : (head :: tail).getLast (List.cons_ne_nil _ _) = false :=
       hdrop_all_false _ hlast_in
     rw [List.getLast?_eq_getLast _ (List.cons_ne_nil _ _), hf] at hb2
-    exact (by decide : (true : Bool) ≠ false) (Option.some.inj hb2).symm
+    simp at hb2
   have heq_bs : b1 = b2 := by rw [hsplit, hdrop_nil, List.append_nil]
   refine ⟨heq_bs, ?_⟩
   have := congrArg List.length heq

@@ -39,8 +39,6 @@ mode. Key generation, public-key bytes and prepared-key bytes are unchanged;
 the application must associate the mode with the key, since the bytes do not
 encode it. This crate only implements verification.
 
-The dependency is pinned to the new [`solana-shake` API](https://github.com/blueshift-gg/solana-shake/pull/1).
-
 ### Compile-time prepared pubkey (recommended for Solana programs)
 
 If your program embeds a fixed pubkey, prepare it at compile time. `prepare_pubkey()` is a `const fn` — the decoded NTT-form pubkey is baked into the binary, skipping the decode and forward NTT on every verify:

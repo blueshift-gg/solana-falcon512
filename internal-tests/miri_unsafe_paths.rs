@@ -21,7 +21,6 @@ use super::*;
 //   - `hash_to_point`'s raw-pointer walk over the rate lanes and `c[]`
 //   - `Falcon512PreparedPubkey::from_ref` alignment-required cast
 
-
 // Embed a known-good (pubkey, signature, message) triple so we can run
 // a real verify path through Miri without needing PQClean.
 static PK_BYTES: &[u8; FALCON_512_PUBKEY_LEN] =

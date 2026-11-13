@@ -2,8 +2,8 @@
   Falcon512.Refinement — Per-element algebraic facts that justify each
   of the six Rust verify-pipeline optimizations.
 
-  This file proves, for each optimization, the per-element ZMod-Q
-  identity that makes the optimization sound. The optimizations and
+  This file proves, for each optimization, the per-element mod-Q
+  identity (core Lean only, no Mathlib) that makes the optimization sound. The optimizations and
   the corresponding lemma:
 
     1. Lazy CT butterfly (skip `% Q` on the sum half)
@@ -31,9 +31,6 @@
 import Falcon512.Defs
 import Falcon512.NTT
 import Falcon512.Norm
-import Mathlib.Data.ZMod.Basic
-import Mathlib.Tactic.Ring
-import Mathlib.Tactic.Linarith
 
 namespace Falcon512.Refinement
 
@@ -53,8 +50,9 @@ open Falcon512.Spec
     after the next multiplication + reduction. -/
 theorem lazy_ct_preserves_mod (a t zeta : Nat) :
     ((a + t) * zeta) % Q = (((a + t) % Q) * zeta) % Q := by
-  conv_lhs => rw [Nat.mul_mod]
-  conv_rhs => rw [Nat.mul_mod, Nat.mod_mod]
+  have h := Nat.mul_mod ((a + t) % Q) zeta Q
+  rw [Nat.mod_mod] at h
+  exact (Nat.mul_mod (a + t) zeta Q).trans h.symm
 
 -- ============================================================================
 -- Optimization 2: Lazy-t butterfly (last forward level)
@@ -70,13 +68,11 @@ theorem lazy_ct_preserves_mod (a t zeta : Nat) :
 theorem lazy_t_preserves_mod (h a b z : Nat) :
     (h * (a + b * z)) % Q = (h * (a + (b * z) % Q)) % Q := by
   -- Both (a + b*z) and (a + (b*z)%Q) are ≡ a + b*z (mod Q).
-  -- So h * either ≡ h * (a + b*z) (mod Q).
-  conv_lhs => rw [Nat.mul_mod]
-  conv_rhs => rw [Nat.mul_mod]
-  congr 1
-  -- Need: (a + b * z) % Q = (a + (b * z) % Q) % Q
-  exact (Nat.add_mod a (b * z) Q).symm ▸
-    (Nat.add_mod a ((b * z) % Q) Q).symm ▸ by rw [Nat.mod_mod]
+  generalize b * z = m
+  have e : (a + m) % Q = (a + m % Q) % Q := by unfold Q; omega
+  calc h * (a + m) % Q = (h % Q * ((a + m) % Q)) % Q := Nat.mul_mod _ _ _
+    _ = (h % Q * ((a + m % Q) % Q)) % Q := by rw [e]
+    _ = h * (a + m % Q) % Q := (Nat.mul_mod _ _ _).symm
 
 -- ============================================================================
 -- Optimization 3: Fused last-fwd + mul + first-inv
@@ -86,7 +82,7 @@ theorem lazy_t_preserves_mod (h a b z : Nat) :
 --
 -- Algebraic equivalence is proved in `Falcon512.Spec.Fused.fused_equiv_zmod`
 -- (this file imports `Falcon512.NTT`, which transitively brings in `Defs`;
--- the Fused proof is one ring-step over ZMod Q):
+-- the Fused proof is one ring-step over Int):
 --   pLow + pHigh                = h0*(a + b*z) + h1*(a - b*z)
 --   (pLow - pHigh) * z_inv      = (h0*(a+b*z) - h1*(a-b*z)) * z_inv
 
@@ -111,7 +107,7 @@ theorem big_q_offset_same_mod (c out : Nat)
     (c + BIG_Q_FUSED_NORM - out) % Q = (c + Q - out % Q) % Q := by
   have hQ_pos : Q > 0 := by unfold Q; omega
   unfold BIG_Q_FUSED_NORM
-  rw [mul_comm Q (2^23)]
+  rw [Nat.mul_comm Q (2^23)]
   apply Falcon512.Spec.Norm.sub_with_multiple_of_q c out (2^23)
   · unfold Q at *; omega
   · have := Nat.mod_lt out hQ_pos; omega
@@ -134,40 +130,9 @@ theorem unreduced_c_same_mod (w x big_q : Nat)
     (hbq : Q ∣ big_q) (hge : w + big_q ≥ x)
     (hbq_pos : big_q ≥ Q) :
     (w + big_q - x) % Q = (w % Q + big_q - x % Q) % Q := by
-  have hQ_pos : Q > 0 := by unfold Q; omega
   obtain ⟨k, rfl⟩ := hbq
-  -- After destructuring: goal uses Q * k (not k * Q)
-  -- hge : w + Q * k ≥ x, hbq_pos : Q * k ≥ Q
-  have hk : k ≥ 1 := by
-    by_contra h; push_neg at h; interval_cases k; omega
-  have hxmod := Nat.mod_lt x hQ_pos
-  have hwmod := Nat.mod_lt w hQ_pos
-  have hge2 : w % Q + Q * k ≥ x % Q := by
-    have : Q * k ≥ Q := Nat.le_mul_of_pos_right Q (by omega)
-    omega
-  suffices h : ((w + Q * k - x : Nat) : Int) % ↑Q =
-               ((w % Q + Q * k - x % Q : Nat) : Int) % ↑Q by exact_mod_cast h
-  rw [Nat.cast_sub hge, Nat.cast_sub hge2]
-  simp only [Nat.cast_add, Nat.cast_mul]
-  have hmod_w : (↑(w % Q) : Int) = ↑w % ↑Q := by omega
-  have hmod_x : (↑(x % Q) : Int) = ↑x % ↑Q := by omega
-  rw [hmod_w, hmod_x]
-  rw [show (↑w : Int) + ↑Q * ↑k - ↑x = (↑w - ↑x) + ↑k * ↑Q from by ring,
-      Int.add_mul_emod_self,
-      show (↑w : Int) % ↑Q + ↑Q * ↑k - ↑x % ↑Q = (↑w % ↑Q - ↑x % ↑Q) + ↑k * ↑Q from by ring,
-      Int.add_mul_emod_self]
-  -- Now need: (↑w - ↑x) % ↑Q = (↑w % ↑Q - ↑x % ↑Q) % ↑Q
-  rw [show (↑w : Int) - ↑x = (↑w % ↑Q - ↑x % ↑Q) + (↑w - ↑w % ↑Q - (↑x - ↑x % ↑Q)) from by ring]
-  have hw_div : ↑w - ↑w % (↑Q : Int) = (↑w / ↑Q) * ↑Q := by
-    have := Int.emod_add_ediv (↑w : Int) (↑Q : Int); linarith
-  have hx_div : ↑x - ↑x % (↑Q : Int) = (↑x / ↑Q) * ↑Q := by
-    have := Int.emod_add_ediv (↑x : Int) (↑Q : Int); linarith
-  rw [show (↑w : Int) % ↑Q - ↑x % ↑Q + ((↑w : Int) - ↑w % ↑Q - (↑x - ↑x % ↑Q)) =
-    (↑w % ↑Q - ↑x % ↑Q) + ((↑w - ↑w % ↑Q) - (↑x - ↑x % ↑Q)) from by ring,
-    hw_div, hx_div,
-    show (↑w : Int) % ↑Q - ↑x % ↑Q + (↑w / ↑Q * ↑Q - ↑x / ↑Q * ↑Q) =
-      (↑w % ↑Q - ↑x % ↑Q) + (↑w / ↑Q - ↑x / ↑Q) * ↑Q from by ring,
-    Int.add_mul_emod_self]
+  unfold Q at *
+  omega
 
 -- ============================================================================
 -- Optimization 6: lazy_offset = 256*Q in inverse GS
@@ -189,7 +154,10 @@ theorem lazy_offset_same_mod (u v zeta : Nat)
     apply Falcon512.Spec.Norm.sub_with_multiple_of_q u v 256
     · unfold Q at *; omega
     · have := Nat.mod_lt v hQ_pos; omega
-  conv_lhs => rw [Nat.mul_mod, key, ← Nat.mul_mod]
+  calc (u + 256 * Q - v) * zeta % Q
+      = ((u + 256 * Q - v) % Q * (zeta % Q)) % Q := Nat.mul_mod _ _ _
+    _ = ((u + Q - v % Q) % Q * (zeta % Q)) % Q := by rw [key]
+    _ = (u + Q - v % Q) * zeta % Q := (Nat.mul_mod _ _ _).symm
 
 -- ============================================================================
 -- Composing the per-optimization lemmas

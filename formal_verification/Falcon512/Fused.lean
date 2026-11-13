@@ -4,9 +4,9 @@
   Scope: proves that for a *single* coefficient pair `(a, b)`, the fused
   composition (forward CT butterfly + pointwise multiply by prepared
   pubkey + inverse GS butterfly) produces the same `(lo, hi)` as
-  performing the three operations separately. The proof works in ZMod Q
-  (where intermediate reductions are implicit) and lifts to Nat via the
-  modular arithmetic identities at the bottom of the file.
+  performing the three operations separately. The proof works over `Int`
+  (core Lean only, no Mathlib): the identities hold exactly in `Int`, hence
+  modulo Q, and lift to Nat via the modular arithmetic identities below.
 
   The whole-array equality between Rust's `fused_last_fwd_mul_first_inv`
   and the three-pass unfused composition is **not** proved here — the
@@ -16,22 +16,21 @@
 
 import Falcon512.Defs
 import Falcon512.NTT
-import Mathlib.Data.ZMod.Basic
-import Mathlib.Tactic.Zify
 
 namespace Falcon512.Spec.Fused
 
 open Falcon512.Spec
 
 -- ============================================================================
--- Algebraic equivalence in ZMod Q (the core proof)
+-- Algebraic equivalence (the core proof)
 -- ============================================================================
 
-/-- In ZMod Q, the fused and unfused computations are algebraically identical.
-    The fused version merely reorders/delays reductions; in a ring (ZMod Q),
-    all intermediate reductions are implicit and the expressions are equal
-    by ring axioms alone. -/
-theorem fused_equiv_zmod (a b z z_inv h0 h1 : ZMod Q) :
+/-- The fused and unfused computations are algebraically identical.
+    The fused version merely reorders/delays reductions. Formerly stated in
+    `ZMod Q`; now stated as exact equality in `Int`, which is stronger
+    (it implies equality of the residues mod Q for any modulus), so the
+    `ZMod Q` statement follows by passing to the quotient. -/
+theorem fused_equiv_zmod (a b z z_inv h0 h1 : Int) :
     -- The unfused computation (with intermediate reductions):
     let t := b * z
     let sLow := a + t
@@ -41,7 +40,8 @@ theorem fused_equiv_zmod (a b z z_inv h0 h1 : ZMod Q) :
     -- equals the fused computation (same algebraic expression):
     pLow + pHigh = h0 * (a + b * z) + h1 * (a - b * z) ∧
     (pLow - pHigh) * z_inv = (h0 * (a + b * z) - h1 * (a - b * z)) * z_inv := by
-  constructor <;> ring
+  intro t sLow sHigh pLow pHigh
+  exact ⟨rfl, rfl⟩
 
 -- ============================================================================
 -- Nat-level consequence: mod Q absorbs intermediate reductions
@@ -77,6 +77,6 @@ theorem nat_sub_offset_equiv (a b k : Nat) (hb : b < Q) (hk : k ≥ 1)
     unfused forms is `fused_equiv_zmod` above. -/
 theorem t_offset_fused_dvd_q : Q ∣ T_OFFSET_FUSED := by
   unfold T_OFFSET_FUSED
-  exact dvd_mul_right Q (2^31)
+  exact Nat.dvd_mul_right Q (2^31)
 
 end Falcon512.Spec.Fused

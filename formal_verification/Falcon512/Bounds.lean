@@ -3,7 +3,7 @@
   invariants.
 
   Each theorem here takes the lazy-NTT level invariant `r ≤ (K+1)·Q`
-  (or its specialisation `b ≤ 8·Q` for the lazy-t butterfly) as a
+  (or its specialisation `b ≤ 8·Q + 2047` for the lazy-t butterfly) as a
   *hypothesis* and proves that, under that invariant, the arithmetic
   in `src/ntt.rs` (CT product, CT sum, lazy-t product, fused-step T
   offset) does not overflow its storage type.
@@ -68,29 +68,29 @@ theorem ct_diff_nonneg (a t : Nat) (ht : t < Q) :
 -- ============================================================================
 
 /-- In the lazy-t butterfly (last forward level), `t = b * zeta` (unreduced)
-    fits in u32 when `b ≤ 8·Q` and `zeta < Q`.
-    Numerically: `8·Q · (Q-1) = 8·12289·12288 = 1,208,258,256 < 2³² ≈ 4.29·10⁹`. -/
+    fits in u32 when `b ≤ LAZY_T_INPUT_MAX = 8·Q + 2047` and `zeta < Q`.
+    Numerically: `(8·Q + 2047)·(Q-1) = 1,233,211,392 < 2³² ≈ 4.29·10⁹`. -/
 theorem lazy_t_fits_u32 (b zeta : Nat)
-    (hb : b ≤ 8 * Q)
+    (hb : b ≤ LAZY_T_INPUT_MAX)
     (hz : zeta < Q) :
     b * zeta < 2^32 := by
+  unfold LAZY_T_INPUT_MAX at hb
   calc b * zeta
-      ≤ 8 * Q * (Q - 1) := Nat.mul_le_mul hb (by omega)
+      ≤ (8 * Q + 2047) * (Q - 1) := Nat.mul_le_mul hb (by omega)
     _ < 2^32 := by unfold Q; omega
 
-/-- `T_OFFSET_LAZY_T = 8·Q²` keeps the lazy-t subtraction non-negative for
-    any `b·zeta` with `b ≤ 8·Q` and `zeta < Q`. The lazy-NTT invariant
-    `a ≤ 8·Q` holds in the calling context but is not load-bearing here —
-    `a + T_OFFSET_LAZY_T ≥ T_OFFSET_LAZY_T ≥ b·zeta` regardless of `a`. -/
+/-- `T_OFFSET_LAZY_T = 9·Q²` keeps the lazy-t subtraction non-negative for
+    any `b·zeta` with `b ≤ LAZY_T_INPUT_MAX` and `zeta < Q`. (The former
+    `8·Q²` was insufficient: `(8·Q + 2047)·(Q-1) > 8·Q²`.) -/
 theorem lazy_t_offset_sufficient (a b zeta : Nat)
-    (hb : b ≤ 8 * Q)
+    (hb : b ≤ LAZY_T_INPUT_MAX)
     (hz : zeta < Q) :
     a + T_OFFSET_LAZY_T ≥ b * zeta := by
-  unfold T_OFFSET_LAZY_T
+  unfold T_OFFSET_LAZY_T LAZY_T_INPUT_MAX at *
   calc b * zeta
-      ≤ 8 * Q * (Q - 1) := Nat.mul_le_mul hb (by omega)
-    _ ≤ 8 * Q * Q := Nat.mul_le_mul_left _ (by omega)
-    _ ≤ a + 8 * Q * Q := Nat.le_add_left _ _
+      ≤ (8 * Q + 2047) * (Q - 1) := Nat.mul_le_mul hb (by omega)
+    _ ≤ 9 * Q * Q := by unfold Q; omega
+    _ ≤ a + 9 * Q * Q := Nat.le_add_left _ _
 
 -- ============================================================================
 -- Theorem: Lazy reduction bounds across all NTT levels
@@ -111,16 +111,16 @@ theorem lazy_bound_fits_u32 (K : Nat) (hK : K ≤ 9) :
 -- ============================================================================
 
 /-- `T_OFFSET_FUSED = Q · 2³¹` in the fused step exceeds the worst-case
-    `t = prev_high · zeta`, where `prev_high ≤ 8·Q + 8·Q²` (the max output
+    `t = prev_high · zeta`, where `prev_high ≤ LAZY_T_INPUT_MAX + 9·Q²` (the max output
     of the lazy-t butterfly stored as u32). -/
 theorem fused_t_offset_sufficient (prev_high zeta : Nat)
-    (hp : prev_high ≤ 8 * Q + 8 * Q * Q)  -- structural bound from lazy-t
+    (hp : prev_high ≤ (8 * Q + 2047) + 9 * Q * Q)  -- structural bound from lazy-t
     (hz : zeta < Q) :
     T_OFFSET_FUSED ≥ prev_high * zeta := by
   unfold T_OFFSET_FUSED
   have hzb : zeta ≤ Q - 1 := by omega
   calc prev_high * zeta
-      ≤ (8 * Q + 8 * Q * Q) * (Q - 1) := Nat.mul_le_mul hp hzb
+      ≤ ((8 * Q + 2047) + 9 * Q * Q) * (Q - 1) := Nat.mul_le_mul hp hzb
     _ ≤ Q * 2^31 := by unfold Q; omega
 
 -- ============================================================================

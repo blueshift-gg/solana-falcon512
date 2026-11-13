@@ -72,5 +72,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo install --locked cargo-build-sbf --version 4.2.0
-      - run: cargo build-sbf --arch v3 --manifest-path program/Cargo.toml
+      # A frame over 4 KiB is only a build warning, and Mollusk runs without
+      # the stack gaps that turn it into an access violation on a validator,
+      # so fail on the warning. v0 (fixed frames) as well as v3.
+      - name: build-sbf (v0, no frame overflow)
+        run: |
+          cargo build-sbf --manifest-path program/Cargo.toml 2>&1 | tee build-v0.log
+          ! grep -q 'overflows the maximum allowed frame space' build-v0.log
+      - name: build-sbf (v3, no frame overflow)
+        run: |
+          cargo build-sbf --arch v3 --manifest-path program/Cargo.toml 2>&1 | tee build-v3.log
+          ! grep -q 'overflows the maximum allowed frame space' build-v3.log
       - run: cargo test --locked -p program --test tests -- --nocapture

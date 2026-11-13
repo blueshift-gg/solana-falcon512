@@ -1,7 +1,8 @@
 #![cfg_attr(any(target_arch = "bpf", target_os = "solana"), no_std)]
 
 use solana_falcon512::{
-    FALCON_512_SIGNATURE_LEN, Falcon512PreparedPubkey, Falcon512Pubkey, Falcon512Signature,
+    FALCON_512_PUBKEY_LEN, FALCON_512_SIGNATURE_LEN, Falcon512PreparedPubkey, Falcon512Pubkey,
+    Falcon512Signature,
 };
 
 use solana_program_error::ProgramError;
@@ -37,7 +38,10 @@ const ERR_VERIFY_FAILED: u64 = 3;
 /// We read the instruction-data slice directly from `input + 16` rather than
 /// going through any deserializer.
 ///
-/// **Instruction data layout:** `[mode: 0 = SHAKE, 1 = TurboSHAKE][signature (666 bytes)][message]`.
+/// **Instruction data layout:** `[mode: 0 = SHAKE, 1 = TurboSHAKE][signature (666 bytes)][message]`,
+/// or `[2][wire pubkey (897 bytes)][signature][message]`, which prepares the
+/// pubkey at runtime (SHAKE) the way a program reading keys from accounts
+/// would.
 ///
 /// # Safety
 ///
@@ -51,7 +55,18 @@ pub unsafe extern "C" fn entrypoint(input: *mut u8) -> u64 {
     }
     let data = unsafe { core::slice::from_raw_parts(input.add(16), ix_data_len) };
 
-    let (mode, data) = data.split_first().unwrap();
+    let (mode, mut data) = data.split_first().unwrap();
+    let mut runtime_pubkey = None;
+    if *mode == 2 {
+        let Some((pk_bytes, rest)) = data.split_first_chunk::<FALCON_512_PUBKEY_LEN>() else {
+            return ProgramError::InvalidInstructionData.into();
+        };
+        match Falcon512Pubkey::<false>::from_ref(pk_bytes).try_prepare_pubkey() {
+            Ok(prepared) => runtime_pubkey = Some(prepared),
+            Err(e) => return e.into(),
+        }
+        data = rest;
+    }
     let Some((sig_bytes, message)) = data.split_first_chunk::<FALCON_512_SIGNATURE_LEN>() else {
         return ProgramError::InvalidInstructionData.into();
     };
@@ -65,6 +80,10 @@ pub unsafe extern "C" fn entrypoint(input: *mut u8) -> u64 {
     let valid = match mode {
         0 => signature.verify_with_prepared(message, &PREPARED_PUBKEY),
         1 => signature.verify_with_prepared(message, &TURBO_PUBKEY),
+        2 => match &runtime_pubkey {
+            Some(prepared) => signature.verify_with_prepared(message, prepared),
+            None => false,
+        },
         _ => return ProgramError::InvalidInstructionData.into(),
     };
     if valid { 0 } else { ERR_VERIFY_FAILED }

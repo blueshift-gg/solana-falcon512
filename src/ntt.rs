@@ -87,6 +87,23 @@ pub(crate) const S2_ABS_MAX: u64 = 2047;
 /// so the inputs reaching the lazy-`t` level are ≤ `8·Q + 2047`.
 pub(crate) const LAZY_T_INPUT_MAX: u64 = 8 * (Q as u64) + S2_ABS_MAX;
 
+/// Largest value the first level ([`sgn_ct_butterfly_step`]) writes: its low
+/// input is `≤ Q + S2_ABS_MAX` and `t < Q`, so `≤ 2·Q + S2_ABS_MAX`.
+pub(crate) const FIRST_LEVEL_OUTPUT_MAX: u64 = 2 * (Q as u64) + S2_ABS_MAX;
+
+/// Strict CT levels between the first level and the lazy-`t` level:
+/// len = N/4, N/8, ..., 4. Each adds at most `Q` to the largest value
+/// (`ct_butterfly_step` outputs `a + t` and `a + q - t`, `t < Q`).
+pub(crate) const STRICT_LEVELS_BEFORE_LAZY_T: u64 = 6;
+// len runs N/4 down to 4: that is 6 levels exactly when N/4 = 4·2^(6-1).
+const _: () = assert!((4u64 << (STRICT_LEVELS_BEFORE_LAZY_T - 1)) == (N as u64) / 4);
+// The chain that bounds the lazy-`t` inputs: first level, then six strict
+// levels, each adding at most Q. (Proved over arrays and levels in
+// `formal_verification/Falcon512/LazyBound.lean`; the per-butterfly facts are
+// Kani harnesses `sgn_ct_butterfly_bound` and `ct_butterfly_adds_at_most_q`.)
+const _: () =
+    assert!(FIRST_LEVEL_OUTPUT_MAX + STRICT_LEVELS_BEFORE_LAZY_T * (Q as u64) == LAZY_T_INPUT_MAX);
+
 /// Offset for the lazy-`t` CT butterfly. `t = b·zeta` with
 /// `b ≤ LAZY_T_INPUT_MAX` and `zeta ≤ Q-1` can reach
 /// `(8·Q + 2047)·(Q-1) ≈ 1.2332·10⁹`, which EXCEEDS `8·Q² ≈ 1.2082·10⁹`;
@@ -147,6 +164,22 @@ const _: () = assert!(10 * (Q as u64) <= u32::MAX as u64);
 // Production macros and Kani harnesses both call these — single source of
 // truth for the arithmetic.
 // ============================================================================
+
+/// First forward level on the signed `s2`: the CT butterfly with the
+/// sign-fix folded in. `s2[i]` becomes `Q + s2[i]` WITHOUT a `% q` (`as u64`
+/// sign-extends, so a negative value wraps back down to `Q - |s2[i]|`), so
+/// the low input is `≤ Q + 2047 < 2·Q` and the outputs `r_lo + t` and
+/// `r_lo + q - t`, with `t < Q`, are `≤ FIRST_LEVEL_OUTPUT_MAX`. The next
+/// level's `· zeta % q` absorbs the un-reduction. Saves the per-butterfly
+/// sign-fix mod (~512 mods total).
+#[inline(always)]
+pub(crate) const fn sgn_ct_butterfly_step(s_lo: i16, s_hi: i16, zeta: u64) -> (u64, u64) {
+    let q = Q as u64;
+    let r_lo = (s_lo as i64 as u64).wrapping_add(q);
+    let r_hi = (s_hi as i64 as u64).wrapping_add(q);
+    let t = r_hi * zeta % q;
+    (r_lo + t, r_lo + q - t)
+}
 
 /// Strict CT butterfly: high-half `t` reduced mod Q. Lazy invariant
 /// `a, b ≤ 10·Q` ∧ `zeta < Q` ⇒ both outputs fit u32.
@@ -453,27 +486,15 @@ pub const fn ntt_main_levels(r: &mut [u32; N]) {
 // Output `r` is fully written by the first level (every j ∈ 0..N/2 writes
 // both r[j] and r[j+N/2]) — caller does NOT need to pre-zero `r`.
 pub fn ntt_main_levels_from_signed(r: &mut [u32; N], s2: &[i16; N]) {
-    let q = Q as u64;
     let zeta = ZETAS[1] as u64;
     let mut j = 0;
     while j < N / 2 {
         unsafe { core::hint::assert_unchecked(j + 7 + N / 2 < N) };
         macro_rules! sgn_ct_bf {
             ($jj:expr) => {{
-                // Sign-fix WITHOUT a `% q` reduction. `s2[i] as i64 as u64`
-                // sign-extends i16 → i64 then takes the bit pattern as u64;
-                // adding `q` lands the value at `q + s2[i]` for positive s2
-                // (∈ [q, q+2047]) and wraps to `q - |s2[i]|` for negative
-                // (∈ [q-2047, q]). Either way `r_lo` ≡ `s2[i] mod q` and is
-                // bounded by `q + 2047 < 2·q`. The lazy CT outputs `r_lo + t`
-                // and `r_lo + q - t` are then ≤ 3·q each, well within u32,
-                // and the next level's mul·zeta·% q absorbs un-reduction.
-                // Saves the per-butterfly sign-fix mod (~512 mods total).
-                let r_lo = (s2[$jj] as i64 as u64).wrapping_add(q);
-                let r_hi = (s2[$jj + N / 2] as i64 as u64).wrapping_add(q);
-                let t = r_hi * zeta % q;
-                r[$jj] = (r_lo + t) as u32;
-                r[$jj + N / 2] = (r_lo + q - t) as u32;
+                let (lo, hi) = sgn_ct_butterfly_step(s2[$jj], s2[$jj + N / 2], zeta);
+                r[$jj] = lo as u32;
+                r[$jj + N / 2] = hi as u32;
             }};
         }
         sgn_ct_bf!(j);

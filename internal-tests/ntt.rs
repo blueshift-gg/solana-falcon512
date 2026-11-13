@@ -426,3 +426,140 @@ fn forward_ntt_from_signed_extremes_matches_reference() {
         assert_eq!(buf, expect);
     }
 }
+
+// ---- the Lean model of the forward NTT's levels matches the code ----
+//
+// `formal_verification/Falcon512/LazyBound.lean` proves, for ANY twiddles < Q,
+// that after the first level and six strict levels every value is
+// <= LAZY_T_INPUT_MAX, so the lazy-`t` subtraction cannot underflow. It proves
+// that for a functional model of the levels. This test is the link between
+// that model and `ntt_main_levels_from_signed`: it implements the model
+// exactly as the Lean file defines it (closed-form block/partner indexing, the
+// twiddle of block `blk` at half-width `len` being ZETAS[N/(2*len) + blk]) and
+// asserts the real code's output equals it bit for bit (u32 values, before the
+// final len = 1 level), on random, extreme, sparse and adversarial inputs.
+
+/// The Lean model: `s2` through the first level, the strict levels
+/// len = N/4 ..= 4, then the lazy-`t` level (len = 2). Returns the values after
+/// the lazy-`t` level and the largest value any lazy-`t` butterfly read.
+fn lean_model_forward(s2: &[i16; N]) -> ([u64; N], u64) {
+    let q = Q as u64;
+    let zeta_of = |len: usize, blk: usize| ZETAS[N / (2 * len) + blk] as u64;
+
+    // First level (len = N/2): input is Q + s2 as a natural number.
+    let input: Vec<u64> = s2.iter().map(|&c| (q as i64 + c as i64) as u64).collect();
+    let mut r = [0u64; N];
+    for (i, out) in r.iter_mut().enumerate() {
+        let len = N / 2;
+        let (blk, high) = (i / (2 * len), (i / len) % 2 == 1);
+        let j = if high { i - len } else { i };
+        let t = input[j + len] * zeta_of(len, blk) % q;
+        *out = if high { input[j] + q - t } else { input[j] + t };
+    }
+    // Strict levels, then the lazy-t level.
+    let mut worst_input = 0;
+    let mut len = N / 4;
+    while len >= 2 {
+        let prev = r;
+        for (i, out) in r.iter_mut().enumerate() {
+            let (blk, high) = (i / (2 * len), (i / len) % 2 == 1);
+            let j = if high { i - len } else { i };
+            let (a, b, z) = (prev[j], prev[j + len], zeta_of(len, blk));
+            if len == 2 {
+                worst_input = worst_input.max(a).max(b);
+                let t = b * z;
+                *out = if high { a + T_OFFSET_LAZY_T - t } else { a + t };
+            } else {
+                let t = b * z % q;
+                *out = if high { a + q - t } else { a + t };
+            }
+        }
+        len /= 2;
+    }
+    (r, worst_input)
+}
+
+fn check_model_against_code(s2: &[i16; N]) -> u64 {
+    let (model, worst_input) = lean_model_forward(s2);
+    let mut code = [0u32; N];
+    ntt_main_levels_from_signed(&mut code, s2);
+    for i in 0..N {
+        assert_eq!(model[i], code[i] as u64, "index {i} for s2 = {s2:?}");
+        assert!(model[i] <= LAZY_T_OUTPUT_MAX);
+    }
+    assert!(worst_input <= LAZY_T_INPUT_MAX);
+    worst_input
+}
+
+#[test]
+fn forward_ntt_levels_match_lean_model() {
+    let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move || {
+        rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (rng >> 33) as usize
+    };
+    let mut worst = 0;
+
+    // Uniform random, ternary extremes, and sparse inputs.
+    for round in 0..4000 {
+        let mut s2 = [0i16; N];
+        for c in s2.iter_mut() {
+            *c = match round % 3 {
+                0 => (next() % 4095) as i16 - 2047,
+                1 => [-2047i16, 2047, 0][next() % 3],
+                _ => {
+                    if next() % 16 == 0 {
+                        [-2047i16, 2047][next() % 2]
+                    } else {
+                        0
+                    }
+                }
+            };
+        }
+        worst = worst.max(check_model_against_code(&s2));
+    }
+    // Constant, alternating and one-hot at every position, both signs.
+    for sign in [-2047i16, 2047] {
+        worst = worst.max(check_model_against_code(&[sign; N]));
+        let mut alt = [0i16; N];
+        for (i, c) in alt.iter_mut().enumerate() {
+            *c = if i % 2 == 0 { sign } else { -sign };
+        }
+        worst = worst.max(check_model_against_code(&alt));
+        for pos in 0..N {
+            let mut one = [0i16; N];
+            one[pos] = sign;
+            worst = worst.max(check_model_against_code(&one));
+        }
+    }
+    // Adversarial: hill-climb toward the largest lazy-t input (what the old
+    // offset could not hold), then check that input too.
+    let mut best = [0i16; N];
+    let mut best_score = 0;
+    for _ in 0..12 {
+        let mut s2 = [0i16; N];
+        for c in s2.iter_mut() {
+            *c = [-2047i16, 2047, 0][next() % 3];
+        }
+        let mut score = lean_model_forward(&s2).1;
+        for _ in 0..1500 {
+            let i = next() % N;
+            let old = s2[i];
+            s2[i] = [-2047i16, 2047, 0, (next() % 4095) as i16 - 2047][next() % 4];
+            let new = lean_model_forward(&s2).1;
+            if new >= score {
+                score = new;
+            } else {
+                s2[i] = old;
+            }
+        }
+        if score > best_score {
+            (best, best_score) = (s2, score);
+        }
+    }
+    worst = worst.max(check_model_against_code(&best));
+    println!("largest lazy-t input seen: {worst} (bound {LAZY_T_INPUT_MAX})");
+    assert!(worst <= LAZY_T_INPUT_MAX);
+}

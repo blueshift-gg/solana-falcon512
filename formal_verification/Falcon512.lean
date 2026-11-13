@@ -20,6 +20,14 @@
 --      lazy GS offset).
 --   2. Lazy-NTT bound arithmetic (every intermediate value fits its u32/u64
 --      storage given the lazy invariant; each Rust offset is sufficient).
+--      `LazyBound.lean` proves end to end that the forward NTT of a signed s2
+--      (|s2| <= 2047) keeps all inputs to the lazy-t level <= 8Q+2047
+--      (`forward_ntt_input_to_lazy_t_le`; previously only argued in a Rust
+--      comment), hence `9Q^2` suffices (`lazy_t_no_underflow_end_to_end`).
+--      `LazyBound.lean` proves end to end that the forward NTT of a signed s2
+--      (|s2| <= 2047) keeps all inputs to the lazy-t level <= 8Q+2047
+--      (`forward_ntt_input_to_lazy_t_le`; previously only argued in a Rust
+--      comment), hence `9Q^2` suffices (`lazy_t_no_underflow_end_to_end`).
 --   3. HashToPoint rejection-bound counting form (every residue has
 --      exactly five preimages in the accept set ⇒ uniform mod Q).
 --   4. Abstract byte-level codec canonicality (`serializeFalcon_injective`):
@@ -27,6 +35,8 @@
 
 import Falcon512.Defs            -- Core spec definitions (Q, N, offsets, butterfly types)
 import Falcon512.Bounds          -- Arithmetic safety under the lazy-reduction invariants
+import Falcon512.LazyBound       -- End-to-end level-by-level bound: inputs to lazy-t level <= 8Q+2047
+import Falcon512.LazyBound       -- End-to-end level-by-level bound: inputs to lazy-t level <= 8Q+2047
 import Falcon512.NTT             -- Per-pair butterfly algebra + Q-related constants
 import Falcon512.Fused           -- Per-pair fused-step equivalence
 import Falcon512.Norm            -- Per-element fused-norm primitives

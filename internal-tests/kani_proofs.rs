@@ -11,8 +11,9 @@
 //! Run: cargo kani --harness <name>
 
 use crate::ntt::{
-    LAZY_T_INPUT_MAX, LAZY_T_OUTPUT_MAX, T_OFFSET_LAZY_T, ct_butterfly_lazy_t_step,
-    ct_butterfly_step, fused_norm_step, fused_step_kernel, gs_butterfly_lazy_step,
+    FIRST_LEVEL_OUTPUT_MAX, LAZY_T_INPUT_MAX, LAZY_T_OUTPUT_MAX, S2_ABS_MAX, T_OFFSET_LAZY_T,
+    ct_butterfly_lazy_t_step, ct_butterfly_step, fused_norm_step, fused_step_kernel,
+    gs_butterfly_lazy_step, sgn_ct_butterfly_step,
 };
 use crate::{N, Q};
 
@@ -45,6 +46,46 @@ fn ct_butterfly_no_overflow() {
     let (lo, hi) = ct_butterfly_step(a, b, zeta);
     assert!(lo <= u32::MAX as u64);
     assert!(hi <= u32::MAX as u64);
+}
+
+/// Strict CT butterfly adds at most `Q` to the largest value: for any bound
+/// `m`, a, b ≤ m and zeta < Q ⇒ both outputs ≤ m + Q. Six of these levels sit
+/// between the first level and the lazy-`t` level, so the lazy-`t` inputs are
+/// ≤ FIRST_LEVEL_OUTPUT_MAX + 6·Q (see the const-assert in `ntt.rs`).
+#[kani::proof]
+#[kani::solver(z3)]
+fn ct_butterfly_adds_at_most_q() {
+    let m: u64 = kani::any();
+    let a: u64 = kani::any();
+    let b: u64 = kani::any();
+    let zeta: u64 = kani::any();
+    kani::assume(m <= 10 * Q as u64);
+    kani::assume(a <= m);
+    kani::assume(b <= m);
+    kani::assume(zeta < Q as u64);
+
+    let (lo, hi) = ct_butterfly_step(a, b, zeta);
+    assert!(lo <= m + Q as u64);
+    assert!(hi <= m + Q as u64);
+}
+
+/// First level on the signed `s2` (the real kernel `ntt_main_levels_from_signed`
+/// calls): for any `s2` in [-2047, 2047] and zeta < Q, both outputs are
+/// ≤ FIRST_LEVEL_OUTPUT_MAX (= 2·Q + 2047) and fit u32.
+#[kani::proof]
+#[kani::solver(z3)]
+fn sgn_ct_butterfly_bound() {
+    let s_lo: i16 = kani::any();
+    let s_hi: i16 = kani::any();
+    let zeta: u64 = kani::any();
+    kani::assume(s_lo >= -(S2_ABS_MAX as i16) && s_lo <= S2_ABS_MAX as i16);
+    kani::assume(s_hi >= -(S2_ABS_MAX as i16) && s_hi <= S2_ABS_MAX as i16);
+    kani::assume(zeta < Q as u64);
+
+    let (lo, hi) = sgn_ct_butterfly_step(s_lo, s_hi, zeta);
+    assert!(lo <= FIRST_LEVEL_OUTPUT_MAX);
+    assert!(hi <= FIRST_LEVEL_OUTPUT_MAX);
+    assert!(FIRST_LEVEL_OUTPUT_MAX <= u32::MAX as u64);
 }
 
 /// Lazy-`t` CT butterfly: a, b ≤ LAZY_T_INPUT_MAX (= 8·Q + 2047), zeta < Q ⇒ both outputs fit u32.

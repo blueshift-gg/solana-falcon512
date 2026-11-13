@@ -2726,9 +2726,9 @@ dependencies = [
 
 [[package]]
 name = "solana-shake"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25c60f3b87e627522e650fea735a94cd007446f04a9284b08618f51efc8c3545"
+checksum = "01afca2d63fff9bb19b61ee09ecc0a7a570b949aee24544d4dc4301a78887d06"
 
 [[package]]
 name = "solana-signature"

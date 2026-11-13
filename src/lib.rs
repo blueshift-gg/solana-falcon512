@@ -68,7 +68,9 @@ use solana_program_error::ProgramError;
 mod codec;
 mod ntt;
 
-#[cfg(kani)]
+// Kani compiles dependencies with `cfg(kani)` too, and `internal-tests/` is not
+// in the published crate, so the proofs need a cfg only this repo's CI sets.
+#[cfg(all(kani, solana_falcon512_kani))]
 #[path = "../internal-tests/kani_proofs.rs"]
 mod kani_proofs;
 

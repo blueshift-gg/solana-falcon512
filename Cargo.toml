@@ -34,11 +34,11 @@ members = [
 ]
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(solana_falcon512_kani)'] }
 
 [dependencies]
 solana-program-error = "3.0.1"
-solana-shake = "0.1.0"
+solana-shake = "0.1.1"
 
 [dev-dependencies]
 proptest = "1"

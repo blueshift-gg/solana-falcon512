@@ -42,6 +42,8 @@ jobs:
   kani:
     name: kani (formal verification)
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings --cfg solana_falcon512_kani
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

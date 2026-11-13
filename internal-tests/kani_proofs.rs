@@ -8,7 +8,7 @@
 //! `internal-tests/` directory is excluded from the published tarball by
 //! [package.exclude].
 //!
-//! Run: cargo kani --harness <name>
+//! Run: RUSTFLAGS="--cfg solana_falcon512_kani" cargo kani --harness <name>
 
 use crate::ntt::{
     FIRST_LEVEL_OUTPUT_MAX, LAZY_T_INPUT_MAX, LAZY_T_OUTPUT_MAX, S2_ABS_MAX, T_OFFSET_LAZY_T,

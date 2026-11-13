@@ -258,6 +258,10 @@ impl<const TURBO: bool> Falcon512Pubkey<TURBO> {
     /// `prepare_pubkey` (panicking, `const`) is preferred when the pubkey is
     /// known at compile time, since the work runs at build time and any
     /// failure becomes a compile error.
+    // Not inlined: the 2 KiB decoded key and the 1 KiB prepared key, added
+    // to a caller's frame, overrun the 4 KiB SBF stack frame (which only
+    // the runtime's stack gaps catch, as an access violation).
+    #[inline(never)]
     pub fn try_prepare_pubkey(&self) -> Result<Falcon512PreparedPubkey<TURBO>, ProgramError> {
         let bytes = &self.0;
         if bytes[0] != PUBKEY_HEADER {

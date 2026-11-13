@@ -106,3 +106,33 @@ fn verify_turbo_and_reject_cross_mode() {
         }
     }
 }
+
+// Mode 2 prepares the wire pubkey on-chain: the path a program reading keys
+// from accounts takes, and the one whose stack use the const-prepared modes
+// never exercise.
+#[test]
+fn verify_with_runtime_prepared_pubkey() {
+    let (mollusk, program_id) = make_mollusk();
+    let pk = *include_bytes!("fixtures/falcon.pk");
+    let mut bad_pk = pk;
+    bad_pk[0] ^= 1;
+    for (key, sig, ok) in [(pk, SIG, true), (bad_pk, SIG, false)] {
+        let mut data = vec![2];
+        data.extend_from_slice(&key);
+        data.extend_from_slice(&sig);
+        data.extend_from_slice(MSG);
+        let ix = Instruction {
+            program_id,
+            accounts: vec![],
+            data,
+        };
+        let result = mollusk.process_instruction(&ix, &[]);
+        assert_eq!(result.program_result.is_ok(), ok);
+        if ok {
+            println!(
+                "verify_runtime_prepared OK — compute units consumed: {}",
+                result.compute_units_consumed
+            );
+        }
+    }
+}
